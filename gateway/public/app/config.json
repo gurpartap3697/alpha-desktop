@@ -1,0 +1,45 @@
+{
+  "minAppVersion": "0.1.0",
+  "announcement": null,
+  "defaults": {
+    "contextWindow": 8192,
+    "maxOutputTokens": 2048,
+    "temperature": 0.7
+  },
+  "models": {
+    "gemma": {
+      "displayName": "Gemma",
+      "description": "General purpose",
+      "contextWindow": 8192,
+      "maxOutputTokens": 2048,
+      "reasoning": { "supported": false },
+      "vision": false
+    },
+    "qwen": {
+      "displayName": "Qwen",
+      "description": "General purpose, strong at code",
+      "contextWindow": 32768,
+      "maxOutputTokens": 8192,
+      "reasoning": {
+        "supported": true,
+        "defaultOn": true,
+        "onBody": { "chat_template_kwargs": { "enable_thinking": true } },
+        "offBody": { "chat_template_kwargs": { "enable_thinking": false } }
+      },
+      "vision": false
+    },
+    "nemotron": {
+      "displayName": "Nemotron",
+      "description": "Reasoning",
+      "contextWindow": 32768,
+      "maxOutputTokens": 8192,
+      "reasoning": {
+        "supported": true,
+        "defaultOn": true,
+        "onBody": { "chat_template_kwargs": { "enable_thinking": true } },
+        "offBody": { "chat_template_kwargs": { "enable_thinking": false } }
+      },
+      "vision": false
+    }
+  }
+}

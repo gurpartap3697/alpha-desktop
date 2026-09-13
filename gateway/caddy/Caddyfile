@@ -1,0 +1,31 @@
+# Public entry point for the desktop app.
+# Only the endpoints the app needs are exposed; LiteLLM's admin API/UI is not.
+
+{$GATEWAY_DOMAIN} {
+	# --- TLS (pick one; remove the others) ---------------------------------
+	# 1. Default: Caddy gets a certificate automatically (needs public DNS + ACME reachability).
+	# 2. Org-issued certificate (internal CA): put files in caddy/certs/ and uncomment:
+	# tls /certs/fullchain.pem /certs/privkey.pem
+	# 3. Caddy's own internal CA (testing only; clients must trust Caddy's root):
+	# tls internal
+	# ------------------------------------------------------------------------
+
+	# Remote app config and (later) updater artifacts.
+	handle /app/* {
+		root * /srv
+		header Cache-Control "no-cache"
+		file_server
+	}
+
+	@api path /v1/models /v1/chat/completions /health/liveliness
+	handle @api {
+		reverse_proxy litellm:4000 {
+			# Stream SSE tokens immediately instead of buffering.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		respond 404
+	}
+}
