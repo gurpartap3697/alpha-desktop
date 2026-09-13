@@ -613,10 +613,10 @@ mod tests {
         assert_eq!((m.status.as_str(), m.error.unwrap().kind), ("stopped", ErrorKind::Interrupted));
     }
 
-    /// End-to-end against a running OpenAI-compatible server. Skipped unless ALPH_TEST_GATEWAY is set.
-    ///   Mock:  ALPH_TEST_GATEWAY=http://127.0.0.1:8000 ALPH_TEST_MOCK=1 cargo test live_
-    ///   Real:  ALPH_TEST_GATEWAY=http://127.0.0.1:8000 ALPH_TEST_MODEL=Qwen/Qwen3-1.7B cargo test live_ -- --nocapture
-    /// ALPH_TEST_KEY defaults to "test". The real model must support chat_template_kwargs.enable_thinking.
+    /// End-to-end against a running OpenAI-compatible server. Skipped unless ALPHA_TEST_GATEWAY is set.
+    ///   Mock:  ALPHA_TEST_GATEWAY=http://127.0.0.1:8000 ALPHA_TEST_MOCK=1 cargo test live_
+    ///   Real:  ALPHA_TEST_GATEWAY=http://127.0.0.1:8000 ALPHA_TEST_MODEL=Qwen/Qwen3-1.7B cargo test live_ -- --nocapture
+    /// ALPHA_TEST_KEY defaults to "test". The real model must support chat_template_kwargs.enable_thinking.
     mod live {
         use super::*;
         use crate::config::{AppConfig, ModelMeta, ReasoningMeta};
@@ -625,16 +625,16 @@ mod tests {
         struct Live { gw: Gateway, key: String, model: String }
 
         fn setup() -> Option<Live> {
-            let base = std::env::var("ALPH_TEST_GATEWAY").ok()?;
+            let base = std::env::var("ALPHA_TEST_GATEWAY").ok()?;
             Some(Live {
                 gw: Gateway::with_base(&base).unwrap(),
-                key: std::env::var("ALPH_TEST_KEY").unwrap_or_else(|_| "test".into()),
-                model: std::env::var("ALPH_TEST_MODEL").unwrap_or_else(|_| "qwen".into()),
+                key: std::env::var("ALPHA_TEST_KEY").unwrap_or_else(|_| "test".into()),
+                model: std::env::var("ALPHA_TEST_MODEL").unwrap_or_else(|_| "qwen".into()),
             })
         }
 
         fn is_mock() -> bool {
-            std::env::var("ALPH_TEST_MOCK").is_ok()
+            std::env::var("ALPHA_TEST_MOCK").is_ok()
         }
 
         /// The model with a Qwen-style reasoning toggle and a window large enough that the app

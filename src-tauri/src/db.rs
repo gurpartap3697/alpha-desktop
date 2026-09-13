@@ -538,7 +538,7 @@ fn migrate(conn: &mut Connection) -> Result<(), AppError> {
     if version > MIGRATIONS.len() {
         return Err(AppError::new(
             ErrorKind::Database,
-            "Chat history was saved by a newer version of Alph. Update the app to open it.",
+            "Chat history was saved by a newer version of Alpha. Update the app to open it.",
         ));
     }
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(version) {
@@ -552,7 +552,7 @@ fn migrate(conn: &mut Connection) -> Result<(), AppError> {
 
 /// Answers still `streaming` at startup were cut off by the app closing.
 fn recover_interrupted(conn: &Connection) -> Result<usize, AppError> {
-    let error = AppError::new(ErrorKind::Interrupted, "Alph was closed before the answer finished");
+    let error = AppError::new(ErrorKind::Interrupted, "Alpha was closed before the answer finished");
     Ok(conn.execute(
         "UPDATE messages SET status = CASE WHEN content <> '' THEN 'stopped' ELSE 'error' END,
            error = ?1, ended_at = COALESCE(ended_at, ?2)

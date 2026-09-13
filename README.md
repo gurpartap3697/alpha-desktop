@@ -1,4 +1,4 @@
-# Alph Desktop
+# Alpha Desktop
 
 Desktop chat client for the org's self-hosted models (vLLM behind a LiteLLM gateway). Tauri v2 + React + TypeScript. See [plan.md](plan.md).
 
@@ -25,13 +25,13 @@ npm install
 
 # Option A: mock server only (any key works)
 python3 gateway/mock/mock_vllm.py --port 8000
-ALPH_GATEWAY_URL=http://localhost:8000 npm run tauri dev
+ALPHA_GATEWAY_URL=http://localhost:8000 npm run tauri dev
 
 # Option B: full local gateway (see gateway/README.md), then use a key from create-key.sh
-ALPH_GATEWAY_URL=http://localhost:8080 npm run tauri dev
+ALPHA_GATEWAY_URL=http://localhost:8080 npm run tauri dev
 ```
 
-`ALPH_GATEWAY_URL` is compiled into the binary, and the app refuses to talk to any other host. When it is unset, the app uses `http://localhost:4000`. After changing it, Cargo rebuilds automatically.
+`ALPHA_GATEWAY_URL` is compiled into the binary, and the app refuses to talk to any other host. When it is unset, the app uses `http://localhost:4000`. After changing it, Cargo rebuilds automatically.
 
 The mock also serves `gateway/public/app/config.json` at `/app/config.json`, as Caddy does. A bare vLLM server doesn't, so against one the app falls back to built-in defaults (no thinking toggle, context window from vLLM's `max_model_len`).
 
@@ -47,9 +47,9 @@ The fake keeps chat history and settings in the browser's `localStorage` with a 
 
 ### Where things are stored
 
-- API key: macOS Keychain, Windows Credential Manager or Linux Secret Service (service `com.alph.desktop`). If none is available it goes to a `0600` file `gateway-key` in the app data directory, and the app says so. Unsigned dev builds on macOS may ask for Keychain access after each rebuild.
+- API key: macOS Keychain, Windows Credential Manager or Linux Secret Service (service `com.alpha.desktop`). If none is available it goes to a `0600` file `gateway-key` in the app data directory, and the app says so. Unsigned dev builds on macOS may ask for Keychain access after each rebuild.
 - Last good app config: `app-config.json` in the app data directory.
-- Chat history: `history.sqlite3` in the app data directory (macOS `~/Library/Application Support/com.alph.desktop`, Windows `%APPDATA%\com.alph.desktop`, Linux `~/.local/share/com.alph.desktop`). Only the Rust core opens it. The webview gets typed commands, not SQL. Answers are written as they stream (about every 0.75 s). Any answer still marked as streaming at startup was cut off by the app closing and is marked as such. Schema migrations are in `src-tauri/src/db.rs`, and the version is tracked with `PRAGMA user_version`. An older app refuses to open history written by a newer one. Deleted chats are overwritten on disk (`secure_delete`), and "Delete all chats" also compacts the file and its WAL.
+- Chat history: `history.sqlite3` in the app data directory (macOS `~/Library/Application Support/com.alpha.desktop`, Windows `%APPDATA%\com.alpha.desktop`, Linux `~/.local/share/com.alpha.desktop`). Only the Rust core opens it. The webview gets typed commands, not SQL. Answers are written as they stream (about every 0.75 s). Any answer still marked as streaming at startup was cut off by the app closing and is marked as such. Schema migrations are in `src-tauri/src/db.rs`, and the version is tracked with `PRAGMA user_version`. An older app refuses to open history written by a newer one. Deleted chats are overwritten on disk (`secure_delete`), and "Delete all chats" also compacts the file and its WAL.
 - Settings (theme, defaults for new chats, auto-delete): the `settings` table of the same database, one row per setting. The theme is also copied to the webview's `localStorage` so the window starts in the right colors. Auto-delete runs when the app starts and hourly while it's open. It goes by each chat's last message, and never deletes a chat that is answering.
 
 ## Test
@@ -57,8 +57,8 @@ The fake keeps chat history and settings in the browser's `localStorage` with a 
 ```sh
 cd src-tauri
 cargo test                                                                # unit tests (SSE parser, trimming, history, settings, …)
-ALPH_TEST_GATEWAY=http://127.0.0.1:8000 ALPH_TEST_MOCK=1 cargo test       # + live tests against the mock
-ALPH_TEST_GATEWAY=http://127.0.0.1:8000 ALPH_TEST_MODEL=Qwen/Qwen3-1.7B \
+ALPHA_TEST_GATEWAY=http://127.0.0.1:8000 ALPHA_TEST_MOCK=1 cargo test       # + live tests against the mock
+ALPHA_TEST_GATEWAY=http://127.0.0.1:8000 ALPHA_TEST_MODEL=Qwen/Qwen3-1.7B \
   cargo test live_ -- --nocapture --test-threads=1                        # live tests against a real model
 ```
 
@@ -86,7 +86,7 @@ Esc only stops the answer when it isn't closing something else (a menu, a dialog
 ## Build
 
 ```sh
-ALPH_GATEWAY_URL=https://llm.example.org npm run tauri build
+ALPHA_GATEWAY_URL=https://llm.example.org npm run tauri build
 ```
 
 CI (`.github/workflows/build.yml`) builds unsigned bundles on native runners:
@@ -95,7 +95,7 @@ CI (`.github/workflows/build.yml`) builds unsigned bundles on native runners:
 - Windows: NSIS `.exe` and `.msi`
 - Linux: AppImage, `.deb` and `.rpm`
 
-Set the repository variable `ALPH_GATEWAY_URL` so CI builds point at the real gateway.
+Set the repository variable `ALPHA_GATEWAY_URL` so CI builds point at the real gateway.
 
 ## Phase 3 checklist
 

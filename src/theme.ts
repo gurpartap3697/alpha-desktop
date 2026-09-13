@@ -2,7 +2,7 @@ import type { Theme } from "./api";
 
 // The theme is saved in the database, which is read after the first paint. A copy in localStorage
 // lets the page start in the right colors.
-const KEY = "alph.theme";
+const KEY = "alpha.theme";
 
 export function applyTheme(theme: Theme) {
   const root = document.documentElement;

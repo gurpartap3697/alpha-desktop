@@ -44,7 +44,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "alph-desktop"
+name = "alpha-desktop"
 version = "0.1.0"
 dependencies = [
  "futures-util",

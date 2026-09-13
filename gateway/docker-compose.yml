@@ -1,4 +1,4 @@
-name: alph-gateway
+name: alpha-gateway
 
 services:
   postgres:

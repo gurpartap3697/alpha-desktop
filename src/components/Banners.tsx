@@ -52,7 +52,7 @@ export function Banners() {
       <Notice
         key="storage"
         tone="warn"
-        title="No system keychain was found, so your key is saved in a private file in Alph's data folder."
+        title="No system keychain was found, so your key is saved in a private file in Alpha's data folder."
         onDismiss={() => dismiss("storage")}
       />,
     );

@@ -6,7 +6,7 @@ export function toMarkdown(c: Conversation, modelName: (id: string | null) => st
   const out: string[] = [`# ${c.title.replace(/\s+/g, " ")}`, ""];
   const date = (ms: number) =>
     new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-  out.push(`Started ${date(c.createdAt)}, exported from Alph ${date(now.getTime())}.`, "");
+  out.push(`Started ${date(c.createdAt)}, exported from Alpha ${date(now.getTime())}.`, "");
 
   if (c.systemPrompt?.trim()) {
     out.push("**System prompt**", "", quote(c.systemPrompt.trim()), "");

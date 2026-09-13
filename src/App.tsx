@@ -13,7 +13,7 @@ import { Sidebar } from "./components/Sidebar";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Button, Delayed, IconButton, Notice, cx } from "./components/ui";
 
-const SIDEBAR_KEY = "alph.sidebarOpen";
+const SIDEBAR_KEY = "alpha.sidebarOpen";
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
 
 function useSidebar() {
@@ -101,7 +101,7 @@ export default function App() {
         <Notice
           className="m-auto w-full max-w-md"
           tone="error"
-          title={`Alph couldn't start. ${errorTitle(bootError)}`}
+          title={`Alpha couldn't start. ${errorTitle(bootError)}`}
           details={bootError.message}
           actions={<Button onClick={() => void boot()}>Try again</Button>}
         />
@@ -113,8 +113,8 @@ export default function App() {
     case "loading":
       return (
         <Delayed ms={400}>
-          <main className="flex h-full" aria-busy="true" aria-label="Starting Alph">
-            <p className="m-auto animate-pulse font-serif text-[2rem] font-[560] tracking-[-0.02em] text-ink-3">Alph</p>
+          <main className="flex h-full" aria-busy="true" aria-label="Starting Alpha">
+            <p className="m-auto animate-pulse font-serif text-[2rem] font-[560] tracking-[-0.02em] text-ink-3">Alpha</p>
           </main>
         </Delayed>
       );

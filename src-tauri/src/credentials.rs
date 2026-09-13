@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-const SERVICE: &str = "com.alph.desktop";
+const SERVICE: &str = "com.alpha.desktop";
 const ACCOUNT: &str = "gateway-api-key";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn file_store_round_trip_with_private_permissions() {
-        let dir = std::env::temp_dir().join(format!("alph-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("alpha-test-{}", std::process::id()));
         let store = FileStore::new(dir.join("nested").join("key"));
         assert_eq!(store.get(), Ok(None));
         store.set("sk-file").unwrap();

@@ -64,7 +64,7 @@ test("an answer cut off by closing the app is marked as interrupted", async ({ a
   await page.waitForTimeout(1500);
   await page.reload();
   await app.chatRow("/slow a long answer").getByRole("button").first().click();
-  await expect(page.getByText("Alph was closed before the answer finished. What arrived is kept above.")).toBeVisible();
+  await expect(page.getByText("Alpha was closed before the answer finished. What arrived is kept above.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Regenerate" })).toBeVisible();
 });
 

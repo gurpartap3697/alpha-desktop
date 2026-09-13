@@ -42,8 +42,8 @@ jobs:
       - name: Rust tests (unit + live against mock)
         working-directory: src-tauri
         env:
-          ALPH_TEST_GATEWAY: http://127.0.0.1:8000
-          ALPH_TEST_MOCK: "1"
+          ALPHA_TEST_GATEWAY: http://127.0.0.1:8000
+          ALPHA_TEST_MOCK: "1"
         run: cargo test
 
   e2e:
@@ -87,7 +87,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
     env:
       # Set in repo Settings → Secrets and variables → Variables. Unset = http://localhost:4000.
-      ALPH_GATEWAY_URL: ${{ vars.ALPH_GATEWAY_URL }}
+      ALPHA_GATEWAY_URL: ${{ vars.ALPHA_GATEWAY_URL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -117,7 +117,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: alph-${{ runner.os }}
+          name: alpha-${{ runner.os }}
           if-no-files-found: error
           path: |
             src-tauri/target/**/release/bundle/dmg/*.dmg

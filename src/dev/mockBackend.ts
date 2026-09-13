@@ -80,7 +80,7 @@ See [the Python docs](https://docs.python.org/3/library/collections.html) for mo
 
 // ---- History (a small stand-in for src-tauri/src/db.rs) ----
 
-const HISTORY_KEY = "alph-mock-history";
+const HISTORY_KEY = "alpha-mock-history";
 type Stored = Omit<Conversation, "messages"> & { messages: Message[] };
 let history: Record<string, Stored> = {};
 
@@ -100,7 +100,7 @@ function loadHistory() {
       if (m.status === "streaming")
         Object.assign(m, {
           status: m.content ? "stopped" : "error",
-          error: { kind: "interrupted", message: "Alph was closed before the answer finished" },
+          error: { kind: "interrupted", message: "Alpha was closed before the answer finished" },
           endedAt: Date.now(),
         });
   saveHistory();
@@ -225,7 +225,7 @@ function prepare(req: TurnRequest): { conversation: Stored; changed: Message[]; 
 
 // ---- Settings and history as a whole (src-tauri/src/settings.rs, history.rs) ----
 
-const SETTINGS_KEY = "alph-mock-settings";
+const SETTINGS_KEY = "alpha-mock-settings";
 const DAY = 86_400_000;
 
 function loadSettings(): AppSettings {
@@ -454,7 +454,7 @@ export function install() {
         await sleep(60);
         if (scenario === "history_broken") fail("database", "unable to open database file: disk I/O error");
         return {
-          path: "/Users/you/Library/Application Support/com.alph.desktop/history.sqlite3",
+          path: "/Users/you/Library/Application Support/com.alpha.desktop/history.sqlite3",
           conversations: Object.keys(history).length,
           inactive: a.inactiveDays == null ? null : inactive(Number(a.inactiveDays)).length,
         };

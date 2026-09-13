@@ -30,6 +30,6 @@ export function errorTitle(e: AppError, modelName = "This model"): string {
     case "not_found":
       return "This chat no longer exists.";
     case "interrupted":
-      return "Alph was closed before the answer finished.";
+      return "Alpha was closed before the answer finished.";
   }
 }

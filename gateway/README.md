@@ -1,4 +1,4 @@
-# Alph gateway
+# Alpha gateway
 
 LiteLLM Proxy (per-user keys, rate limits) + Postgres + Caddy (TLS, static app config) in front of the vLLM instances.
 

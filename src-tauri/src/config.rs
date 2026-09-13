@@ -133,7 +133,7 @@ pub async fn load(gateway: &Gateway, cache_dir: &Path) -> ConfigStatus {
     let (config, source, fetch_error) = match fetch(gateway).await {
         Ok((config, raw)) => {
             if let Err(e) = write_cache(&cache, &raw) {
-                eprintln!("alph: couldn't cache app config: {e}");
+                eprintln!("alpha: couldn't cache app config: {e}");
             }
             (config, ConfigSource::Remote, None)
         }
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn cache_round_trip() {
-        let dir = std::env::temp_dir().join(format!("alph-config-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("alpha-config-test-{}", std::process::id()));
         assert_eq!(load_cached(&dir), AppConfig::default());
         write_cache(&dir.join(CACHE_FILE), r#"{"minAppVersion":"9.0.0"}"#).unwrap();
         assert_eq!(load_cached(&dir).min_app_version.as_deref(), Some("9.0.0"));

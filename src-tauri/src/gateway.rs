@@ -4,10 +4,10 @@ use reqwest::{header, Client, RequestBuilder, Response};
 
 use crate::error::AppError;
 
-/// Gateway base URL, fixed at compile time: `ALPH_GATEWAY_URL=https://llm.example.org npm run tauri build`.
+/// Gateway base URL, fixed at compile time: `ALPHA_GATEWAY_URL=https://llm.example.org npm run tauri build`.
 /// Every request is built from this base plus a fixed path and redirects are disabled,
 /// so the app cannot be made to send the API key to any other host.
-pub const GATEWAY_URL: &str = match option_env!("ALPH_GATEWAY_URL") {
+pub const GATEWAY_URL: &str = match option_env!("ALPHA_GATEWAY_URL") {
     Some(url) => url,
     None => "http://localhost:4000",
 };
@@ -29,7 +29,7 @@ impl Gateway {
             // take a while before the first token.
             .read_timeout(Duration::from_secs(180))
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("alph-desktop/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("alpha-desktop/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self { client, base: base.trim_end_matches('/').to_owned() })
     }

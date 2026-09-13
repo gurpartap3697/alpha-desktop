@@ -82,7 +82,7 @@ test("auto-delete asks before deleting old chats, then keeps applying", async ({
   await retention.selectOption("custom");
   await app.settings.getByLabel("Days").fill("60");
   await app.settings.getByRole("button", { name: "Apply" }).click();
-  await expect(app.settings.getByText("Chats with no new messages for 60 days are deleted when Alph starts")).toBeVisible();
+  await expect(app.settings.getByText("Chats with no new messages for 60 days are deleted when Alpha starts")).toBeVisible();
   await expect(app.settings.getByText(/will be deleted now/)).toHaveCount(0);
   await page.keyboard.press("Escape");
   // (The sidebar is hidden from assistive tech, and so from these queries, while the dialog is open.)

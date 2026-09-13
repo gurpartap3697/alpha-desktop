@@ -41,7 +41,7 @@ export function KeyScreen() {
   return (
     <main className="flex h-full overflow-y-auto px-6">
       <div className="m-auto w-full max-w-[26rem] py-12">
-        <h1 className="font-serif text-[2.75rem] leading-none font-[560] tracking-[-0.02em]">Alph</h1>
+        <h1 className="font-serif text-[2.75rem] leading-none font-[560] tracking-[-0.02em]">Alpha</h1>
         <p className="mt-3 text-[15px] text-ink-2">
           Chat with your organization's models on {auth ? hostOf(auth.gatewayUrl) : "the model server"}.
         </p>
@@ -103,7 +103,7 @@ export function KeyScreen() {
 
         {auth && (
           <p className="mt-12 text-xs leading-5 text-ink-3">
-            Alph {auth.appVersion}
+            Alpha {auth.appVersion}
             <br />
             {auth.gatewayUrl}
           </p>

@@ -409,7 +409,7 @@ function HistorySection() {
 
           {retention !== null && !pending && !busy && (
             <p className="mt-2 text-xs leading-5 text-ink-3">
-              Chats with no new messages for {days(retention)} are deleted when Alph starts, and every hour while it's open.
+              Chats with no new messages for {days(retention)} are deleted when Alpha starts, and every hour while it's open.
             </p>
           )}
 
@@ -505,7 +505,7 @@ function AccountSection() {
 
   const storage =
     auth.storage === "file"
-      ? "In a private file in Alph's data folder, because no system keychain was found"
+      ? "In a private file in Alpha's data folder, because no system keychain was found"
       : "In the system keychain";
   const source = config && {
     remote: "Up to date",
@@ -529,7 +529,7 @@ function AccountSection() {
         {row("Model server", <span className="font-mono text-xs">{auth.gatewayUrl}</span>)}
         {row("API key", storage)}
         {source && row("Model details", source, config?.fetchError ?? undefined)}
-        {row("App version", `Alph ${auth.appVersion}`)}
+        {row("App version", `Alpha ${auth.appVersion}`)}
       </dl>
       <div className="mt-5">
         <p className="leading-5 text-ink-2">Signing out removes the key from this device. Your chats stay.</p>
