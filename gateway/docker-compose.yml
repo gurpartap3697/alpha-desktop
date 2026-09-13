@@ -29,6 +29,9 @@ services:
     # Reach it from your machine with: ssh -L 4000:localhost:4000 <gateway-host>
     ports:
       - "127.0.0.1:4000:4000"
+    # Lets *_API_BASE point at a vLLM running on the Docker host (Docker Desktop has this built in; Linux needs it).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

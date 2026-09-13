@@ -38,6 +38,11 @@ impl Gateway {
         &self.base
     }
 
+    /// Unauthenticated GET, for static files such as the app config.
+    pub fn get_public(&self, path: &str) -> RequestBuilder {
+        self.client.get(format!("{}{}", self.base, path))
+    }
+
     pub fn get(&self, path: &str, key: &str) -> RequestBuilder {
         self.client.get(format!("{}{}", self.base, path)).bearer_auth(key)
     }

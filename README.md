@@ -33,6 +33,22 @@ ALPH_GATEWAY_URL=http://localhost:8080 npm run tauri dev
 
 `ALPH_GATEWAY_URL` is compiled into the binary, and the app refuses to talk to any other host. When it is unset, the app uses `http://localhost:4000`. After changing it, Cargo rebuilds automatically.
 
+The mock also serves `gateway/public/app/config.json` at `/app/config.json`, as Caddy does. A bare vLLM server doesn't, so against one the app falls back to built-in defaults (no thinking toggle, context window from vLLM's `max_model_len`).
+
+### UI only, in a browser
+
+```sh
+npm run dev   # open http://localhost:1420
+```
+
+Outside Tauri, a fake backend (`src/dev/mockBackend.ts`, dev builds only) stands in for the Rust commands. Start states: `?scenario=no_key`, `rejected`, `unreachable`, `update`, `announcement`, `file_storage`. The key `bad` is rejected. The messages `/error 429|401|404|500|context`, `/drop`, `/slow` and `/unreachable` trigger the matching states.
+
+### Where things are stored
+
+- API key: macOS Keychain, Windows Credential Manager or Linux Secret Service (service `com.alph.desktop`). If none is available it goes to a `0600` file `gateway-key` in the app data directory, and the app says so. Unsigned dev builds on macOS may ask for Keychain access after each rebuild.
+- Last good app config: `app-config.json` in the app data directory.
+- Conversations: not saved yet (Phase 2).
+
 ## Test
 
 ```sh
@@ -56,6 +72,20 @@ CI (`.github/workflows/build.yml`) builds unsigned bundles on native runners:
 - Linux: AppImage, `.deb` and `.rpm`
 
 Set the repository variable `ALPH_GATEWAY_URL` so CI builds point at the real gateway.
+
+## Phase 1 checklist
+
+Run on each OS against the real gateway:
+
+- [ ] First launch shows the key screen; a wrong key says so; a valid key opens the chat
+- [ ] Restarting the app doesn't ask for the key again (it's in the OS keychain; on Linux, check with and without a Secret Service running)
+- [ ] Revoking the key mid-session returns to the key screen with the "rejected" message; a new key continues the conversation (Retry)
+- [ ] Every model from `/v1/models` is listed with its `config.json` name and description; a model missing from the config still works
+- [ ] Editing `config.json` (e.g. an `announcement`) shows up on the next launch; with the gateway down, the cached copy is used
+- [ ] Setting `minAppVersion` above the app version shows the update screen
+- [ ] Streaming, Stop, and the thinking toggle work for each reasoning model; the thinking panel folds away when the answer starts
+- [ ] Markdown tables, code (highlighting and Copy), inline and display math render; links open in the system browser
+- [ ] Error states: off VPN, rate limited (countdown), model down (offers other models), dropped stream (keeps partial text), conversation longer than the context window (older messages left out, then "too long")
 
 ## Phase 0 checklist
 

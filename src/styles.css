@@ -1,0 +1,239 @@
+@import "tailwindcss";
+
+/* River-slate palette. Light is the base; dark follows the OS setting (a theme switch comes in Phase 3). */
+:root {
+  --ground: #eef2f1;
+  --surface: #f8faf9;
+  --ink: #15282c;
+  --ink-2: #4a5e61;
+  --ink-3: #75878a;
+  --line: #d3dcda;
+  --river: #2d6e72;
+  --river-soft: #dce9e8;
+  --sediment: #ebe7da;
+  --brick: #a3412f;
+  --brick-soft: #f4e3de;
+  --amber: #85601a;
+  --amber-soft: #f2ead6;
+  --code-bg: #e2e9e8;
+  --syn-string: #50702a;
+  --syn-number: #8e5a17;
+  --syn-title: #6a4a7a;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0f1a1c;
+    --surface: #152326;
+    --ink: #dae4e2;
+    --ink-2: #a3b3b1;
+    --ink-3: #71817f;
+    --line: #26383b;
+    --river: #86bdb9;
+    --river-soft: #1b3235;
+    --sediment: #1f211c;
+    --brick: #e38c79;
+    --brick-soft: #38201b;
+    --amber: #d9b36a;
+    --amber-soft: #2f2819;
+    --code-bg: #0a1315;
+    --syn-string: #a9c47f;
+    --syn-number: #dba862;
+    --syn-title: #c6a6d8;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-river: var(--river);
+  --color-river-soft: var(--river-soft);
+  --color-sediment: var(--sediment);
+  --color-brick: var(--brick);
+  --color-brick-soft: var(--brick-soft);
+  --color-amber: var(--amber);
+  --color-amber-soft: var(--amber-soft);
+  --color-code: var(--code-bg);
+  --font-sans: system-ui, -apple-system, "Segoe UI", Ubuntu, Cantarell, "Noto Sans", sans-serif;
+  --font-serif: "Literata Variable", Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+}
+
+/* In the base layer so utilities such as focus:outline-none can override it. */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--river);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--river) 28%, transparent);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* ---- Assistant answers ------------------------------------------------ */
+
+.answer {
+  font-family: var(--font-serif);
+  font-size: 1.0625rem;
+  line-height: 1.68;
+  font-variation-settings: "opsz" 14;
+  overflow-wrap: anywhere;
+}
+.answer > :first-child { margin-top: 0; }
+.answer > :last-child { margin-bottom: 0; }
+.answer p,
+.answer ul,
+.answer ol,
+.answer blockquote,
+.answer table,
+.answer .code-block,
+.answer .katex-display { margin: 0.8em 0; }
+.answer h1,
+.answer h2,
+.answer h3,
+.answer h4 {
+  font-weight: 620;
+  line-height: 1.3;
+  margin: 1.4em 0 0.5em;
+}
+.answer h1 { font-size: 1.38em; }
+.answer h2 { font-size: 1.2em; }
+.answer h3 { font-size: 1.06em; }
+.answer h4 { font-size: 1em; font-style: italic; }
+.answer ul { list-style: disc; padding-left: 1.4em; }
+.answer ol { list-style: decimal; padding-left: 1.5em; }
+.answer li { margin: 0.25em 0; }
+.answer li > p { margin: 0.3em 0; }
+.answer li::marker { color: var(--ink-3); }
+.answer a { color: var(--river); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.answer strong { font-weight: 640; }
+.answer hr { border: 0; border-top: 1px solid var(--line); margin: 1.6em 0; }
+.answer blockquote {
+  border-left: 2px solid var(--river);
+  padding-left: 1em;
+  color: var(--ink-2);
+}
+.answer :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.answer .table-scroll { overflow-x: auto; margin: 0.8em 0; }
+.answer table {
+  border-collapse: collapse;
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.45;
+  margin: 0;
+}
+.answer th,
+.answer td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.45em 1em 0.45em 0;
+  text-align: left;
+  vertical-align: top;
+}
+.answer th { font-weight: 600; color: var(--ink-2); border-bottom-color: var(--ink-3); }
+.answer .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2em 0; }
+.answer .katex { font-size: 1.05em; }
+
+.code-block {
+  background: var(--code-bg);
+  border-radius: 8px;
+  font-family: var(--font-sans);
+}
+.code-block pre {
+  margin: 0;
+  padding: 0.2em 1em 0.9em;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.code-block pre code { font-family: inherit; }
+
+/* highlight.js tokens mapped onto the palette */
+.hljs-comment,
+.hljs-quote { color: var(--ink-3); font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-type,
+.hljs-doctag { color: var(--river); }
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-template-tag { color: var(--syn-string); }
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-variable.constant_ { color: var(--syn-number); }
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class { color: var(--syn-title); }
+.hljs-attr,
+.hljs-attribute,
+.hljs-meta,
+.hljs-params { color: var(--ink-2); }
+.hljs-deletion { color: var(--brick); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* Streaming caret, at the end of the last block */
+.answer.streaming > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--river);
+  animation: blink 1s steps(2, start) infinite;
+}
+@keyframes blink { to { visibility: hidden; } }
+
+/* Thinking: a slow shimmer on the label only while the model is reasoning */
+.thinking-label {
+  background: linear-gradient(90deg, var(--ink-3) 30%, var(--ink) 50%, var(--ink-3) 70%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 2.2s linear infinite;
+}
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -50% 0; } }

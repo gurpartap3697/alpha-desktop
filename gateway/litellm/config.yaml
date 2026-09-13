@@ -6,26 +6,26 @@
 # model_name       -> the id the desktop app sees in /v1/models (keep it short and stable)
 # litellm_params.model -> "hosted_vllm/<served model name>", i.e. vLLM's --served-model-name
 #                    (or the HF repo id if that flag isn't set). Check with: curl <vllm>/v1/models
+#                    Set per environment in .env (*_MODEL), next to the matching *_API_BASE.
 
 model_list:
   - model_name: gemma
     litellm_params:
-      model: hosted_vllm/gemma           # TODO: replace with the served model name
+      model: os.environ/GEMMA_MODEL
       api_base: os.environ/GEMMA_API_BASE
       api_key: os.environ/VLLM_API_KEY
 
   - model_name: qwen
     litellm_params:
-      model: hosted_vllm/qwen            # TODO: replace with the served model name
+      model: os.environ/QWEN_MODEL
       api_base: os.environ/QWEN_API_BASE
       api_key: os.environ/VLLM_API_KEY
 
   - model_name: nemotron
     litellm_params:
-      model: hosted_vllm/nemotron        # TODO: replace with the served model name
+      model: os.environ/NEMOTRON_MODEL
       api_base: os.environ/NEMOTRON_API_BASE
       api_key: os.environ/VLLM_API_KEY
-  
 
 litellm_settings:
   # Keep prompts/responses out of logs and callbacks; metadata (user, model, tokens, latency) is kept.

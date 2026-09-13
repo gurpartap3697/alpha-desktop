@@ -9,6 +9,17 @@ app ──HTTPS──▶ Caddy ──▶ LiteLLM :4000 ──▶ vLLM (gemma / q
 
 Caddy exposes only `/v1/models`, `/v1/chat/completions`, `/health/liveliness` and `/app/*`. Key management is reachable only from the gateway host (use an SSH tunnel).
 
+## Run locally against a vLLM on this machine
+
+Point a model at the host, not `localhost` (inside the LiteLLM container that is the container itself), and use vLLM's served id:
+
+```sh
+QWEN_API_BASE=http://host.docker.internal:8000/v1
+QWEN_MODEL=hosted_vllm/Qwen/Qwen3-1.7B
+```
+
+Caddy matches the `GATEWAY_DOMAIN` host, so with `http://localhost` call `http://localhost:8080`; `127.0.0.1:8080` gets an empty response.
+
 ## Run locally (no GPUs)
 
 ```sh
@@ -19,7 +30,7 @@ docker compose --profile mock up -d
 curl -s http://localhost:8080/v1/models -H "Authorization: Bearer sk-..."
 ```
 
-The mock (`mock/mock_vllm.py`) streams fake reasoning + content and can simulate failures. Send these as the user message: `/error 429`, `/error 401`, `/error 500`, `/drop` (connection closes mid-stream), `/slow`. You can also run it without Docker: `python3 mock/mock_vllm.py --port 8000`.
+The mock (`mock/mock_vllm.py`) streams fake reasoning + content, serves `public/app/config.json` at `/app/config.json`, and can simulate failures. Send these as the user message: `/error 429`, `/error 401`, `/error 500`, `/drop` (connection closes mid-stream), `/slow`. You can also run it without Docker: `python3 mock/mock_vllm.py --port 8000`.
 
 ## Deploy against real vLLM
 
@@ -27,8 +38,8 @@ The mock (`mock/mock_vllm.py`) streams fake reasoning + content and can simulate
    - `GATEWAY_DOMAIN`
    - strong `POSTGRES_PASSWORD`, `LITELLM_MASTER_KEY` and `LITELLM_SALT_KEY`
    - `VLLM_API_KEY`
-   - the three `*_API_BASE` URLs
-2. In `litellm/config.yaml`, replace each `hosted_vllm/<name>` with the instance's served model name (`curl <vllm>/v1/models`).
+   - the three `*_API_BASE` URLs, and each `*_MODEL` as `hosted_vllm/<served model name>` (the id from `curl <vllm>/v1/models`)
+2. Recreate LiteLLM after any `.env` change: `docker compose up -d litellm` (`restart` doesn't reload `.env`).
 3. TLS: choose an option in `caddy/Caddyfile`. For an org-issued certificate, put the files in `caddy/certs/`.
 4. `docker compose up -d` (no `--profile mock`).
 5. Firewall the vLLM instances so that only the gateway host can reach them.
@@ -47,7 +58,7 @@ ssh -L 4000:localhost:4000 <gateway-host>              # from your machine
 
 ## Adding a model
 
-1. Add an entry to `litellm/config.yaml`, then run `docker compose restart litellm`.
+1. Add an entry to `litellm/config.yaml` (and its `*_API_BASE` / `*_MODEL` to `.env`), then run `docker compose up -d litellm`.
 2. Optionally add display and reasoning metadata under `models` in `public/app/config.json`. Caddy serves it live, so no restart is needed.
 
 No app release is needed.

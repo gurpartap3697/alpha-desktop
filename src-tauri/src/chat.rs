@@ -1,15 +1,18 @@
 use futures_util::StreamExt;
+use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{ipc::Channel, State};
 use tokio_util::sync::CancellationToken;
 
+use crate::context;
 use crate::error::{AppError, ErrorKind};
 use crate::gateway::{check, Gateway};
+use crate::models::ModelInfo;
 use crate::sse::SseParser;
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -19,12 +22,14 @@ pub struct ChatMessage {
 #[serde(rename_all = "camelCase")]
 pub struct ChatPayload {
     pub model: String,
+    /// Full conversation, oldest first, optionally starting with a system message.
+    /// Trimmed to the model's context window before sending.
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f64>,
+    /// Defaults to the model's `maxOutputTokens`.
     pub max_tokens: Option<u32>,
-    /// Merged into the request body, e.g. a model's reasoning `onBody` / `offBody`.
-    #[serde(default)]
-    pub extra_body: Option<Map<String, Value>>,
+    /// Reasoning on/off for models that support the toggle. `None` = the model's default.
+    pub reasoning: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -38,6 +43,8 @@ pub struct Usage {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
+    /// Sent before any delta when older messages were left out to fit the context window.
+    Trimmed { dropped: usize },
     ContentDelta { text: String },
     ReasoningDelta { text: String },
     Usage { usage: Usage },
@@ -52,36 +59,38 @@ impl From<AppError> for StreamEvent {
     }
 }
 
-pub fn build_body(payload: ChatPayload) -> Result<Value, AppError> {
-    if payload.model.trim().is_empty() {
+pub fn build_body(
+    model: &str,
+    messages: &[ChatMessage],
+    temperature: Option<f64>,
+    max_tokens: Option<u32>,
+    extra: Option<&Map<String, Value>>,
+) -> Result<Value, AppError> {
+    if model.trim().is_empty() {
         return Err(AppError::new(ErrorKind::BadRequest, "No model selected"));
     }
-    for m in &payload.messages {
+    if messages.is_empty() {
+        return Err(AppError::new(ErrorKind::BadRequest, "No messages to send"));
+    }
+    for m in messages {
         if !matches!(m.role.as_str(), "system" | "user" | "assistant") {
             return Err(AppError::new(ErrorKind::BadRequest, format!("Invalid role: {}", m.role)));
         }
     }
     let mut body = json!({});
-    if let Some(extra) = payload.extra_body {
-        deep_merge(&mut body, Value::Object(extra));
+    if let Some(extra) = extra {
+        deep_merge(&mut body, Value::Object(extra.clone()));
     }
-    // Fields below always win over anything in extra_body.
+    // Fields below always win over anything in `extra`.
     let obj = body.as_object_mut().expect("body is an object");
-    obj.insert("model".into(), json!(payload.model));
-    obj.insert(
-        "messages".into(),
-        Value::Array(
-            payload.messages.into_iter()
-                .map(|m| json!({ "role": m.role, "content": m.content }))
-                .collect(),
-        ),
-    );
+    obj.insert("model".into(), json!(model));
+    obj.insert("messages".into(), json!(messages));
     obj.insert("stream".into(), json!(true));
     obj.insert("stream_options".into(), json!({ "include_usage": true }));
-    if let Some(t) = payload.temperature {
+    if let Some(t) = temperature {
         obj.insert("temperature".into(), json!(t));
     }
-    if let Some(n) = payload.max_tokens {
+    if let Some(n) = max_tokens {
         obj.insert("max_tokens".into(), json!(n));
     }
     Ok(body)
@@ -194,50 +203,84 @@ pub async fn chat_stream(
 ) -> Result<(), AppError> {
     let send = |ev: StreamEvent| on_event.send(ev).is_ok();
 
-    let Some(key) = state.api_key() else {
-        send(AppError::new(ErrorKind::NoKey, "No API key set").into());
-        return Ok(());
-    };
-    let body = match build_body(payload) {
-        Ok(b) => b,
+    let token = CancellationToken::new();
+    state.streams.lock().unwrap().insert(request_id.clone(), token.clone());
+    let _guard = StreamGuard { state: &state, request_id };
+
+    let key = match state.api_key().await {
+        Ok(k) => k,
         Err(e) => {
             send(e.into());
             return Ok(());
         }
     };
-
-    let token = CancellationToken::new();
-    state.streams.lock().unwrap().insert(request_id.clone(), token.clone());
-    let _guard = StreamGuard { state: &state, request_id };
-
-    run_stream(&state.gateway, &key, &body, &token, send).await;
+    let model = state.model(&payload.model);
+    run_chat(&state.gateway, &key, &model, payload, &token, send).await;
     Ok(())
 }
 
-/// POST the body and forward events to `send` until done, error, cancellation,
-/// or `send` returning false (UI gone).
-pub async fn run_stream(
+fn cancelled() -> StreamEvent {
+    StreamEvent::Done { finish_reason: Some("cancelled".into()) }
+}
+
+/// Fit the conversation into the model's context window and stream the reply. If the server still
+/// says the prompt is too long, leave out the older half of the history and retry once.
+pub async fn run_chat(
     gateway: &Gateway,
     key: &str,
-    body: &Value,
+    model: &ModelInfo,
+    payload: ChatPayload,
     token: &CancellationToken,
     mut send: impl FnMut(StreamEvent) -> bool,
 ) {
-    let cancelled = || StreamEvent::Done { finish_reason: Some("cancelled".into()) };
+    let max_tokens = payload.max_tokens.unwrap_or(model.max_output_tokens);
+    let budget = context::prompt_budget(model.context_window, max_tokens);
+    let (mut messages, mut dropped) = context::fit(&payload.messages, budget);
+    let extra = model.reasoning_body(payload.reasoning);
+    let mut retried = false;
 
-    let request = gateway.post("/v1/chat/completions", key).json(body).send();
-    let resp = tokio::select! {
-        _ = token.cancelled() => { send(cancelled()); return; }
-        r = request => r,
-    };
-    let resp = match resp {
-        Ok(r) => match check(r).await {
-            Ok(r) => r,
-            Err(e) => { send(e.into()); return; }
-        },
-        Err(e) => { send(AppError::from(e).into()); return; }
-    };
+    loop {
+        let body = match build_body(&model.id, &messages, payload.temperature, Some(max_tokens), extra) {
+            Ok(b) => b,
+            Err(e) => {
+                send(e.into());
+                return;
+            }
+        };
+        let request = gateway.post("/v1/chat/completions", key).json(&body).send();
+        let resp = tokio::select! {
+            _ = token.cancelled() => { send(cancelled()); return; }
+            r = request => r,
+        };
+        let err = match resp {
+            Ok(r) => match check(r).await {
+                Ok(r) => {
+                    if dropped > 0 && !send(StreamEvent::Trimmed { dropped }) {
+                        return;
+                    }
+                    pump(r, token, send).await;
+                    return;
+                }
+                Err(e) => e,
+            },
+            Err(e) => AppError::from(e),
+        };
+        if err.kind == ErrorKind::ContextLength && !retried {
+            if let Some(fewer) = context::drop_older_half(&messages) {
+                dropped += messages.len() - fewer.len();
+                messages = fewer;
+                retried = true;
+                continue;
+            }
+        }
+        send(err.into());
+        return;
+    }
+}
 
+/// Forward a streaming response's events to `send` until done, error, cancellation,
+/// or `send` returning false (UI gone).
+async fn pump(resp: Response, token: &CancellationToken, mut send: impl FnMut(StreamEvent) -> bool) {
     let mut bytes = resp.bytes_stream();
     let mut parser = SseParser::new();
     let mut st = StreamState::default();
@@ -291,6 +334,10 @@ pub fn chat_cancel(state: State<'_, AppState>, request_id: String) {
 mod tests {
     use super::*;
 
+    fn user(content: &str) -> ChatMessage {
+        ChatMessage { role: "user".into(), content: content.into() }
+    }
+
     #[test]
     fn reads_both_reasoning_field_names() {
         let mut st = StreamState::default();
@@ -336,18 +383,24 @@ mod tests {
     fn body_merges_extra_but_core_fields_win() {
         let extra: Map<String, Value> = serde_json::from_str(
             r#"{"chat_template_kwargs":{"enable_thinking":false},"stream":false,"model":"evil"}"#).unwrap();
-        let body = build_body(ChatPayload {
-            model: "qwen".into(),
-            messages: vec![ChatMessage { role: "user".into(), content: "hi".into() }],
-            temperature: Some(0.2),
-            max_tokens: None,
-            extra_body: Some(extra),
-        }).unwrap();
+        let body = build_body("qwen", &[user("hi")], Some(0.2), None, Some(&extra)).unwrap();
         assert_eq!(body["model"], "qwen");
         assert_eq!(body["stream"], true);
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
         assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["messages"], json!([{ "role": "user", "content": "hi" }]));
         assert!(body.get("max_tokens").is_none());
+        assert!(build_body("qwen", &[], None, None, None).is_err());
+        assert!(build_body("qwen", &[ChatMessage { role: "tool".into(), content: "".into() }], None, None, None).is_err());
+    }
+
+    #[test]
+    fn payload_shape_from_ui() {
+        let p: ChatPayload = serde_json::from_str(
+            r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}],"maxTokens":64,"reasoning":false}"#).unwrap();
+        assert_eq!((p.max_tokens, p.reasoning, p.temperature), (Some(64), Some(false), None));
+        let ev = serde_json::to_value(StreamEvent::Trimmed { dropped: 2 }).unwrap();
+        assert_eq!(ev, json!({ "type": "trimmed", "dropped": 2 }));
     }
 
     /// End-to-end against a running OpenAI-compatible server. Skipped unless ALPH_TEST_GATEWAY is set.
@@ -356,6 +409,8 @@ mod tests {
     /// ALPH_TEST_KEY defaults to "test". The real model must support chat_template_kwargs.enable_thinking.
     mod live {
         use super::*;
+        use crate::config::{AppConfig, ModelMeta, ReasoningMeta};
+        use crate::models;
 
         struct Live { gw: Gateway, key: String, model: String }
 
@@ -372,17 +427,25 @@ mod tests {
             std::env::var("ALPH_TEST_MOCK").is_ok()
         }
 
-        async fn collect(gw: &Gateway, key: &str, model: &str, prompt: &str, extra: Option<Value>,
+        /// The model with a Qwen-style reasoning toggle and a window large enough that the app
+        /// doesn't trim, so the server's own context check is exercised.
+        fn model_info(id: &str) -> ModelInfo {
+            let body = |on: bool| json!({ "chat_template_kwargs": { "enable_thinking": on } }).as_object().cloned();
+            let mut config = AppConfig::default();
+            config.models.insert(id.into(), ModelMeta {
+                context_window: Some(1_000_000),
+                max_output_tokens: Some(1024),
+                reasoning: ReasoningMeta { supported: true, default_on: true, on_body: body(true), off_body: body(false) },
+                ..Default::default()
+            });
+            models::resolve(id, None, &config)
+        }
+
+        async fn collect(gw: &Gateway, key: &str, model: &str, messages: Vec<ChatMessage>, reasoning: Option<bool>,
                          token: &CancellationToken) -> Vec<StreamEvent> {
-            let body = build_body(ChatPayload {
-                model: model.into(),
-                messages: vec![ChatMessage { role: "user".into(), content: prompt.into() }],
-                temperature: None,
-                max_tokens: Some(1024),
-                extra_body: extra.and_then(|v| v.as_object().cloned()),
-            }).unwrap();
+            let payload = ChatPayload { model: model.into(), messages, temperature: None, max_tokens: None, reasoning };
             let mut evs = Vec::new();
-            run_stream(gw, key, &body, token, |ev| { evs.push(ev); true }).await;
+            run_chat(gw, key, &model_info(model), payload, token, |ev| { evs.push(ev); true }).await;
             evs
         }
 
@@ -406,20 +469,26 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn live_list_models() {
+            let Some(l) = setup() else { return };
+            let served = models::fetch(&l.gw, &l.key).await.unwrap();
+            println!("served: {served:?}");
+            assert!(served.iter().any(|m| m.id == l.model), "{} not served", l.model);
+        }
+
+        #[tokio::test]
         async fn live_stream_with_and_without_reasoning() {
             let Some(l) = setup() else { return };
             let t = CancellationToken::new();
-            let prompt = "Say hello in one short sentence.";
+            let prompt = || vec![user("Say hello in one short sentence.")];
 
-            let on = collect(&l.gw, &l.key, &l.model, prompt,
-                Some(json!({ "chat_template_kwargs": { "enable_thinking": true } })), &t).await;
+            let on = collect(&l.gw, &l.key, &l.model, prompt(), Some(true), &t).await;
             println!("[thinking on]\nreasoning: {}\ncontent: {}\nlast: {:?}", text(&on, true), text(&on, false), on.last());
             assert!(!text(&on, true).is_empty(), "expected reasoning deltas");
             assert!(on.iter().any(|e| matches!(e, StreamEvent::Usage { .. })), "expected usage");
             assert!(finished(&on));
 
-            let off = collect(&l.gw, &l.key, &l.model, prompt,
-                Some(json!({ "chat_template_kwargs": { "enable_thinking": false } })), &t).await;
+            let off = collect(&l.gw, &l.key, &l.model, prompt(), Some(false), &t).await;
             println!("[thinking off]\ncontent: {}\nlast: {:?}", text(&off, false), off.last());
             assert!(text(&off, true).is_empty(), "expected no reasoning");
             assert!(!text(&off, false).trim().is_empty(), "expected content");
@@ -432,18 +501,34 @@ mod tests {
             let t = CancellationToken::new();
 
             let long = "hello ".repeat(100_000); // ~100k tokens: over any test model's context
-            let evs = collect(&l.gw, &l.key, &l.model, &long, None, &t).await;
+            let evs = collect(&l.gw, &l.key, &l.model, vec![user(&long)], None, &t).await;
             println!("context: {:?}", evs.last());
             assert_eq!(last_err(&evs).0, ErrorKind::ContextLength);
 
-            let evs = collect(&l.gw, &l.key, "no-such-model", "hi", None, &t).await;
+            let evs = collect(&l.gw, &l.key, "no-such-model", vec![user("hi")], None, &t).await;
             println!("unknown model: {:?}", evs.last());
             if !is_mock() {
                 assert_eq!(last_err(&evs).0, ErrorKind::ModelUnavailable);
             }
 
             let dead = Gateway::with_base("http://127.0.0.1:9").unwrap();
-            assert_eq!(last_err(&collect(&dead, &l.key, &l.model, "hi", None, &t).await).0, ErrorKind::Unreachable);
+            let evs = collect(&dead, &l.key, &l.model, vec![user("hi")], None, &t).await;
+            assert_eq!(last_err(&evs).0, ErrorKind::Unreachable);
+        }
+
+        #[tokio::test]
+        async fn live_context_error_retries_without_old_turns() {
+            let Some(l) = setup() else { return };
+            let t = CancellationToken::new();
+            let history = vec![
+                user(&"hello ".repeat(100_000)),
+                ChatMessage { role: "assistant".into(), content: "Hello!".into() },
+                user("Reply with just the word OK."),
+            ];
+            let evs = collect(&l.gw, &l.key, &l.model, history, Some(false), &t).await;
+            println!("retry: first={:?} last={:?} content={}", evs.first(), evs.last(), text(&evs, false));
+            assert_eq!(evs.first(), Some(&StreamEvent::Trimmed { dropped: 2 }));
+            assert!(finished(&evs));
         }
 
         #[tokio::test]
@@ -451,7 +536,7 @@ mod tests {
             let Some(l) = setup() else { return };
             if !is_mock() { return; }
             let t = CancellationToken::new();
-            let run = |p: &'static str| collect(&l.gw, &l.key, &l.model, p, None, &t);
+            let run = |p: &'static str| collect(&l.gw, &l.key, &l.model, vec![user(p)], None, &t);
             assert_eq!(last_err(&run("/error 429").await), (ErrorKind::RateLimited, Some(7)));
             assert_eq!(last_err(&run("/error 401").await).0, ErrorKind::Unauthorized);
             assert_eq!(last_err(&run("/drop").await).0, ErrorKind::StreamDropped);
@@ -467,7 +552,8 @@ mod tests {
                 t2.cancel();
             });
             // "/slow" makes the mock stream slowly; a real model just sees it as text.
-            let evs = collect(&l.gw, &l.key, &l.model, "/slow Write a 300-word story about a lighthouse.", None, &t).await;
+            let prompt = vec![user("/slow Write a 300-word story about a lighthouse.")];
+            let evs = collect(&l.gw, &l.key, &l.model, prompt, None, &t).await;
             assert!(matches!(evs.last(), Some(StreamEvent::Done { finish_reason: Some(r) }) if r == "cancelled"),
                     "got {:?}", evs.last());
         }

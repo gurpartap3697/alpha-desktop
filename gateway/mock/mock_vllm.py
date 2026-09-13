@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Fake vLLM OpenAI-compatible server for local development (stdlib only).
 
-Endpoints: GET /v1/models, POST /v1/chat/completions (streaming and non-streaming).
+Endpoints: GET /v1/models, POST /v1/chat/completions (streaming and non-streaming), and
+GET /app/config.json (serves ../public/app/config.json, as Caddy does in the real gateway).
 
 Behaviour:
   - Models: MOCK_MODELS (comma-separated, default "gemma,qwen,nemotron"). Any requested model is served.
@@ -27,6 +28,7 @@ MODELS = [m.strip() for m in os.environ.get("MOCK_MODELS", "gemma,qwen,nemotron"
 REASONING_FIELD = os.environ.get("MOCK_REASONING_FIELD", "reasoning")
 API_KEY = os.environ.get("MOCK_API_KEY", "")
 MAX_CHARS = int(os.environ.get("MOCK_MAX_CHARS", "20000"))
+APP_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", "app", "config.json")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -57,6 +59,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.rstrip("/") == "/health":
             return self._json(200, {})
+        if self.path == "/app/config.json":
+            with open(APP_CONFIG, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.rstrip("/") != "/v1/models":
             return self._error(404, "Not found", "NotFoundError")
         if not self._authorized():
@@ -109,7 +120,9 @@ class Handler(BaseHTTPRequestHandler):
         reasoning = (f"The user said {len(last_user)} characters. Model '{model}', temperature "
                      f"{req.get('temperature')}. I'll echo it back with some markdown.") if thinking else ""
         content = (f"**Mock reply from `{model}`**\n\nYou said:\n\n> {last_user}\n\n"
-                   "```python\nprint('hello from the mock')\n```\n\nInline math: $e^{i\\pi}+1=0$.")
+                   "```python\nprint('hello from the mock')\n```\n\n"
+                   "| Model | Reasoning |\n|---|---|\n| qwen | yes |\n| gemma | no |\n\n"
+                   "Inline math: $e^{i\\pi}+1=0$, and display math:\n\n$$\n\\int_0^1 x^2\\,dx = \\frac{1}{3}\n$$")
         prompt_tokens = max(1, total_chars // 4)
         completion_tokens = max(1, (len(reasoning) + len(content)) // 4)
         cid = f"chatcmpl-{uuid.uuid4().hex}"

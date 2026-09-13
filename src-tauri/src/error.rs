@@ -19,6 +19,8 @@ pub enum ErrorKind {
     /// Unexpected response shape.
     Protocol,
     NoKey,
+    /// The OS credential store (or the fallback file) failed.
+    Storage,
 }
 
 #[derive(Debug, Clone, Serialize, thiserror::Error)]
@@ -41,12 +43,18 @@ impl AppError {
             .unwrap_or_else(|| body.chars().take(500).collect::<String>());
         let message = if message.trim().is_empty() { status.to_string() } else { message };
         let kind = match status.as_u16() {
+            // LiteLLM answers a valid key without access to the model with 401 too.
+            401 | 403 if message.to_ascii_lowercase().contains("not allowed to access model") => ErrorKind::ModelUnavailable,
             401 | 403 => ErrorKind::Unauthorized,
             429 => ErrorKind::RateLimited,
             404 => ErrorKind::ModelUnavailable,
-            400 | 413 | 422 if is_context_error(&message) => ErrorKind::ContextLength,
-            400 | 413 | 422 => ErrorKind::BadRequest,
             _ if is_context_error(&message) => ErrorKind::ContextLength,
+            // LiteLLM: a model id it doesn't route.
+            400 if message.contains("Invalid model name") => ErrorKind::ModelUnavailable,
+            400 | 413 | 422 => ErrorKind::BadRequest,
+            // LiteLLM reports a failure of one model's backend (down, unreachable, crashed) as a 5xx
+            // naming the model group; other models may still work.
+            500..=599 if is_model_backend_error(&message) => ErrorKind::ModelUnavailable,
             _ => ErrorKind::Server,
         };
         Self { kind, message, retry_after }
@@ -99,6 +107,15 @@ pub fn extract_message(body: &str) -> Option<String> {
         .or_else(|| v.get("detail").and_then(pick))
 }
 
+fn is_model_backend_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("model group=")
+        || m.contains("cannot connect to host")
+        || m.contains("connection refused")
+        || m.contains("apiconnectionerror")
+        || m.contains("serviceunavailableerror")
+}
+
 pub fn is_context_error(message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     m.contains("maximum context length")
@@ -117,6 +134,10 @@ mod tests {
     fn classifies_statuses() {
         let e = |s: u16, b: &str| AppError::from_response(StatusCode::from_u16(s).unwrap(), None, b).kind;
         assert_eq!(e(401, r#"{"error":{"message":"Invalid key"}}"#), ErrorKind::Unauthorized);
+        assert_eq!(
+            e(401, r#"{"error":{"message":"API Key not allowed to access model. This token can only access models=['gemma']. Tried to access qwen","type":"auth_error","code":"401"}}"#),
+            ErrorKind::ModelUnavailable
+        );
         assert_eq!(e(429, ""), ErrorKind::RateLimited);
         assert_eq!(e(404, ""), ErrorKind::ModelUnavailable);
         assert_eq!(
@@ -125,6 +146,25 @@ mod tests {
         );
         assert_eq!(e(400, r#"{"error":"bad temperature"}"#), ErrorKind::BadRequest);
         assert_eq!(e(502, "Bad Gateway"), ErrorKind::Server);
+        assert_eq!(e(500, r#"{"error":{"message":"Internal Server Error"}}"#), ErrorKind::Server);
+    }
+
+    /// Bodies captured from LiteLLM v1.100 in front of vLLM.
+    #[test]
+    fn classifies_litellm_errors() {
+        let e = |s: u16, b: &str| AppError::from_response(StatusCode::from_u16(s).unwrap(), None, b).kind;
+        assert_eq!(
+            e(500, r#"{"error":{"message":"litellm.InternalServerError: InternalServerError: Hosted_vllmException - Cannot connect to host localhost:8000 ssl:<ssl.SSLContext object at 0xffff90be6c10> [Connect call failed ('127.0.0.1', 8000)]. Received Model Group=qwen\nAvailable Model Group Fallbacks=None","type":null,"param":null,"code":"500"}}"#),
+            ErrorKind::ModelUnavailable
+        );
+        assert_eq!(
+            e(400, r#"{"error":{"message":"/chat/completions: Invalid model name passed in model=no-such-model. Call `/v1/models` to view available models for your key.","type":"invalid_request_error","param":"model","code":"400"}}"#),
+            ErrorKind::ModelUnavailable
+        );
+        assert_eq!(
+            e(400, r#"{"error":{"message":"litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: Hosted_vllmException - This model's maximum context length is 40960 tokens. Received Model Group=qwen","code":"400"}}"#),
+            ErrorKind::ContextLength
+        );
     }
 
     #[test]

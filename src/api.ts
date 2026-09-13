@@ -11,7 +11,8 @@ export type ErrorKind =
   | "server"
   | "stream_dropped"
   | "protocol"
-  | "no_key";
+  | "no_key"
+  | "storage";
 
 export interface AppError {
   kind: ErrorKind;
@@ -19,10 +20,40 @@ export interface AppError {
   retry_after?: number | null;
 }
 
+// src-tauri/src/auth.rs
 export interface AuthStatus {
   hasKey: boolean;
+  storage: "keychain" | "file" | null;
+  storageError: string | null;
   gatewayUrl: string;
   appVersion: string;
+}
+
+// src-tauri/src/config.rs
+export interface AppConfig {
+  minAppVersion: string | null;
+  announcement: string | null;
+  defaults: { contextWindow: number; maxOutputTokens: number; temperature: number };
+}
+
+export interface ConfigStatus {
+  config: AppConfig;
+  source: "remote" | "cache" | "builtin";
+  fetchError: string | null;
+  updateRequired: boolean;
+}
+
+// src-tauri/src/models.rs
+export interface ModelInfo {
+  id: string;
+  displayName: string;
+  description: string | null;
+  contextWindow: number;
+  maxOutputTokens: number;
+  temperature: number;
+  reasoning: { supported: boolean; defaultOn: boolean };
+  vision: boolean;
+  configured: boolean;
 }
 
 export interface Usage {
@@ -31,8 +62,9 @@ export interface Usage {
   total_tokens?: number | null;
 }
 
-// Mirrors StreamEvent in src-tauri/src/chat.rs
+// src-tauri/src/chat.rs
 export type StreamEvent =
+  | { type: "trimmed"; dropped: number }
   | { type: "content_delta"; text: string }
   | { type: "reasoning_delta"; text: string }
   | { type: "usage"; usage: Usage }
@@ -49,13 +81,15 @@ export interface ChatPayload {
   messages: ChatMessage[];
   temperature?: number;
   maxTokens?: number;
-  extraBody?: Record<string, unknown>;
+  /** Omit to use the model's default. Ignored for models without a reasoning toggle. */
+  reasoning?: boolean;
 }
 
 export const authStatus = () => invoke<AuthStatus>("auth_status");
-export const authSetKey = (key: string) => invoke<void>("auth_set_key", { key });
+export const authSetKey = (key: string) => invoke<AuthStatus>("auth_set_key", { key });
 export const authClear = () => invoke<void>("auth_clear");
-export const listModels = () => invoke<string[]>("list_models");
+export const getAppConfig = () => invoke<ConfigStatus>("get_app_config");
+export const listModels = () => invoke<ModelInfo[]>("list_models");
 
 export function chatStream(
   requestId: string,
@@ -72,3 +106,6 @@ export const chatCancel = (requestId: string) => invoke<void>("chat_cancel", { r
 export function isAppError(e: unknown): e is AppError {
   return typeof e === "object" && e !== null && "kind" in e && "message" in e;
 }
+
+export const toAppError = (e: unknown): AppError =>
+  isAppError(e) ? e : { kind: "protocol", message: e instanceof Error ? e.message : String(e) };
