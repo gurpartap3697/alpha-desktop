@@ -1,23 +1,31 @@
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import * as Popover from "@radix-ui/react-popover";
-import { Check, ChevronDown, CircleUser, SlidersHorizontal, SquarePen } from "lucide-react";
-import { useStore } from "../store";
+import { Check, ChevronDown, CircleUser, PanelLeftOpen, SlidersHorizontal, SquarePen } from "lucide-react";
+import { activeModel, useStore } from "../store";
 import { Button, IconButton } from "./ui";
 
 const panel =
   "z-50 rounded-[10px] border border-line bg-surface p-1 text-ink shadow-[0_8px_30px_-12px_rgb(0_0_0/0.35)] outline-none";
 
-export function TopBar() {
+export function TopBar({ sidebarOpen, onShowSidebar }: { sidebarOpen: boolean; onShowSidebar: () => void }) {
   const newChat = useStore((s) => s.newChat);
-  const hasTurns = useStore((s) => s.turns.length > 0);
+  const draftOpen = useStore((s) => s.chat.id === null && s.chat.messages.length === 0);
+  const title = useStore((s) => s.chat.title);
   return (
     <header className="flex h-12 shrink-0 items-center gap-1 border-b border-line px-3">
+      {!sidebarOpen && (
+        <>
+          <IconButton label="Show sidebar" onClick={onShowSidebar}>
+            <PanelLeftOpen size={16} />
+          </IconButton>
+          <IconButton label="New chat" onClick={newChat} disabled={draftOpen}>
+            <SquarePen size={16} />
+          </IconButton>
+        </>
+      )}
       <ModelPicker />
+      {!sidebarOpen && title && <span className="min-w-0 truncate pl-1 text-[13px] text-ink-3">{title}</span>}
       <div className="flex-1" />
-      <Button variant="quiet" onClick={newChat} disabled={!hasTurns}>
-        <SquarePen size={15} />
-        New chat
-      </Button>
       <ChatSettings />
       <AccountMenu />
     </header>
@@ -26,15 +34,16 @@ export function TopBar() {
 
 function ModelPicker() {
   const models = useStore((s) => s.models);
-  const modelId = useStore((s) => s.modelId);
+  const current = useStore(activeModel);
+  const modelId = current?.id ?? "";
   const status = useStore((s) => s.modelsStatus);
   const selectModel = useStore((s) => s.selectModel);
-  const current = models.find((m) => m.id === modelId);
+  const loading = useStore((s) => s.chat.status !== "ready");
 
   const label = current?.displayName ?? (status === "loading" ? "Loading models…" : "No models available");
   return (
     <Dropdown.Root>
-      <Dropdown.Trigger asChild disabled={models.length === 0}>
+      <Dropdown.Trigger asChild disabled={models.length === 0 || loading}>
         <Button variant="quiet" className="px-2.5 text-[14px] font-semibold text-ink" aria-label={`Model: ${label}`}>
           {label}
           <ChevronDown size={15} className="text-ink-3" />
@@ -70,17 +79,19 @@ function ModelPicker() {
 }
 
 function ChatSettings() {
-  const settings = useStore((s) => s.settings);
+  const settings = useStore((s) => s.chat.settings);
+  const { temperature: temperatureSetting, maxTokens } = settings.params;
   const update = useStore((s) => s.updateSettings);
-  const model = useStore((s) => s.models.find((m) => m.id === s.modelId));
-  const temperature = settings.temperature ?? model?.temperature ?? 0.7;
+  const model = useStore(activeModel);
+  const loading = useStore((s) => s.chat.status !== "ready");
+  const temperature = temperatureSetting ?? model?.temperature ?? 0.7;
   const maxTokensLimit = model ? Math.max(1, model.contextWindow - 256) : undefined;
-  const customized = settings.systemPrompt.trim() !== "" || settings.temperature !== null || settings.maxTokens !== null;
+  const customized = settings.systemPrompt.trim() !== "" || temperatureSetting !== null || maxTokens !== null;
 
   return (
     <Popover.Root>
       <Popover.Trigger asChild>
-        <IconButton label="Chat settings" className={customized ? "text-river" : undefined}>
+        <IconButton label="Chat settings" disabled={loading} className={customized ? "text-river" : undefined}>
           <SlidersHorizontal size={16} />
         </IconButton>
       </Popover.Trigger>
@@ -116,7 +127,7 @@ function ChatSettings() {
                 max={2}
                 step={0.05}
                 value={temperature}
-                onChange={(e) => update({ temperature: Number(e.target.value) })}
+                onChange={(e) => update({ params: { temperature: Number(e.target.value) } })}
                 className="mt-2 w-full accent-(--river)"
               />
               <div className="flex justify-between text-xs text-ink-3">
@@ -135,22 +146,22 @@ function ChatSettings() {
                 type="number"
                 min={1}
                 max={maxTokensLimit}
-                value={settings.maxTokens ?? ""}
+                value={maxTokens ?? ""}
                 placeholder={model ? String(model.maxOutputTokens) : ""}
                 onChange={(e) => {
                   const n = Math.floor(Number(e.target.value));
-                  update({ maxTokens: e.target.value === "" || !(n > 0) ? null : Math.min(n, maxTokensLimit ?? n) });
+                  update({ params: { maxTokens: e.target.value === "" || !(n > 0) ? null : Math.min(n, maxTokensLimit ?? n) } });
                 }}
                 className="mt-2 h-8 w-32 rounded-[7px] border border-line bg-ground px-2.5 tabular-nums placeholder:text-ink-3 focus:border-river focus:outline-none"
               />
             </div>
 
             <div className="flex items-center justify-between border-t border-line pt-3">
-              <span className="text-xs text-ink-3">Applies to the next message you send.</span>
+              <span className="text-xs text-ink-3">Saved with this chat.</span>
               <Button
                 variant="quiet"
-                disabled={settings.temperature === null && settings.maxTokens === null}
-                onClick={() => update({ temperature: null, maxTokens: null })}
+                disabled={temperatureSetting === null && maxTokens === null}
+                onClick={() => update({ params: { temperature: null, maxTokens: null } })}
               >
                 Use model defaults
               </Button>

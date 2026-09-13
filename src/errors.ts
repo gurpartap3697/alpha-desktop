@@ -25,5 +25,11 @@ export function errorTitle(e: AppError, modelName = "This model"): string {
       return "The model server sent a response the app couldn't read.";
     case "storage":
       return "Couldn't access the system keychain.";
+    case "database":
+      return "Couldn't read or save chat history.";
+    case "not_found":
+      return "This chat no longer exists.";
+    case "interrupted":
+      return "Alph was closed before the answer finished.";
   }
 }

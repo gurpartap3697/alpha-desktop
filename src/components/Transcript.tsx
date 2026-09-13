@@ -1,6 +1,7 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowDown, ChevronRight, RotateCcw } from "lucide-react";
-import { useStore, type Turn } from "../store";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, ChevronRight, Pencil, RotateCcw } from "lucide-react";
+import type { Message } from "../api";
+import { activeModel, chatBusy, toTurns, useStore } from "../store";
 import { errorTitle } from "../errors";
 import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
@@ -8,8 +9,14 @@ import { Banners } from "./Banners";
 import { Button, IconButton, Notice } from "./ui";
 
 export function Transcript() {
-  const turns = useStore((s) => s.turns);
-  const streaming = useStore((s) => s.requestId !== null);
+  const messages = useStore((s) => s.chat.messages);
+  const status = useStore((s) => s.chat.status);
+  const loadError = useStore((s) => s.chat.loadError);
+  const chatKey = useStore((s) => s.chat.key);
+  const chatId = useStore((s) => s.chat.id);
+  const openChat = useStore((s) => s.openChat);
+  const streaming = useStore((s) => s.chat.id !== null && s.chat.id in s.streams);
+  const turns = useMemo(() => toTurns(messages), [messages]);
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
   const count = turns.length;
@@ -20,8 +27,8 @@ export function Transcript() {
     if (el && pinned) el.scrollTop = el.scrollHeight;
   }, [turns, pinned]);
 
-  // A new message always brings the view back to the bottom.
-  useLayoutEffect(() => setPinned(true), [count]);
+  // A new message, or another chat, always brings the view back to the bottom.
+  useLayoutEffect(() => setPinned(true), [count, chatKey]);
 
   const onScroll = () => {
     const el = scroller.current;
@@ -33,10 +40,20 @@ export function Transcript() {
       <div ref={scroller} onScroll={onScroll} className="h-full overflow-y-auto px-6">
         <div className="mx-auto max-w-[44rem] pt-5 pb-10">
           <Banners />
-          {count === 0 ? (
+          {status === "error" && loadError ? (
+            <Notice
+              className="mt-4"
+              tone="error"
+              title={errorTitle(loadError)}
+              details={loadError.message}
+              actions={loadError.kind !== "not_found" && chatId && <Button onClick={() => void openChat(chatId)}>Try again</Button>}
+            />
+          ) : status === "loading" ? null : count === 0 ? (
             <EmptyState />
           ) : (
-            turns.map((t, i) => <TurnView key={t.id} turn={t} isLast={i === count - 1} />)
+            turns.map((t, i) => (
+              <TurnView key={t.user.id} user={t.user} answer={t.answer} isLast={i === count - 1} laterCount={messages.length - 1 - messages.indexOf(t.user) - (t.answer ? 1 : 0)} />
+            ))
           )}
         </div>
       </div>
@@ -55,7 +72,7 @@ export function Transcript() {
 }
 
 function EmptyState() {
-  const model = useStore((s) => s.models.find((m) => m.id === s.modelId));
+  const model = useStore(activeModel);
   if (!model) return null;
   return (
     <div className="pt-[18vh]">
@@ -63,67 +80,165 @@ function EmptyState() {
       <p className="mt-2 max-w-[34rem] text-[15px] leading-6 text-ink-2">
         {model.description ?? "Ask a question, paste some text to work on, or describe a problem."}
       </p>
-      <p className="mt-5 text-[13px] text-ink-3">Chats aren't saved yet. Closing the app or starting a new chat clears this one.</p>
+      <p className="mt-5 text-[13px] text-ink-3">Chats are saved on this device only.</p>
     </div>
   );
 }
 
-const TurnView = memo(function TurnView({ turn, isLast }: { turn: Turn; isLast: boolean }) {
-  const modelName = useStore((s) => s.models.find((m) => m.id === turn.modelId)?.displayName ?? turn.modelId);
-  const canRegenerate = useStore((s) => isLast && s.requestId === null);
-  const retryLast = useStore((s) => s.retryLast);
-  const streaming = turn.status === "streaming";
+const modelNameOf = (id: string | null | undefined) => (s: { models: { id: string; displayName: string }[] }) =>
+  s.models.find((m) => m.id === id)?.displayName ?? id ?? "the model";
+
+const TurnView = memo(function TurnView({
+  user,
+  answer,
+  isLast,
+  laterCount,
+}: {
+  user: Message;
+  answer?: Message;
+  isLast: boolean;
+  /** Messages after this turn, removed if the user message is edited. */
+  laterCount: number;
+}) {
+  const modelName = useStore(modelNameOf(answer?.modelId));
+  const idle = useStore((s) => !chatBusy(s));
+  const regenerate = useStore((s) => s.regenerate);
+  const [editing, setEditing] = useState(false);
+  const streaming = answer?.status === "streaming";
 
   return (
     <section className="mt-9 first:mt-4">
-      <div className="border-l-2 border-river pl-3.5 text-[15px] leading-6 break-words whitespace-pre-wrap">{turn.user}</div>
-
-      <div className="mt-5">
-        {!!turn.dropped && (
-          <p className="mb-3 text-xs text-ink-3">
-            {turn.dropped === 1 ? "1 older message wasn't" : `${turn.dropped} older messages weren't`} sent, to fit{" "}
-            {modelName}'s context window.
-          </p>
-        )}
-        {turn.reasoning && <ReasoningPanel turn={turn} />}
-        {turn.content ? (
-          <Markdown text={turn.content} streaming={streaming} />
-        ) : (
-          streaming && !turn.reasoning && <p className="thinking-label text-[14px]">Waiting for {modelName}</p>
-        )}
-
-        {turn.error && <TurnError turn={turn} modelName={modelName} isLast={isLast} />}
-        {turn.finishReason === "cancelled" && <p className="mt-3 text-xs text-ink-3">Stopped</p>}
-        {turn.finishReason === "length" && (
-          <p className="mt-3 text-xs text-ink-3">
-            The answer hit the maximum length. You can raise it in chat settings.
-          </p>
-        )}
-
-        {/* Failed turns get their actions from the error notice instead. */}
-        {!streaming && !turn.error && (
-          <div className="mt-2 -ml-2 flex items-center gap-0.5">
-            {turn.content && <CopyButton text={turn.content} label="Copy answer" />}
-            {canRegenerate && (
-              <IconButton label="Regenerate" onClick={() => retryLast()}>
-                <RotateCcw size={15} />
-              </IconButton>
-            )}
-            <span
-              className="ml-1.5 text-xs text-ink-3"
-              title={turn.usage ? `${turn.usage.prompt_tokens ?? "?"} tokens in, ${turn.usage.completion_tokens ?? "?"} out` : undefined}
-            >
-              {modelName}
-            </span>
+      {editing ? (
+        <EditMessage message={user} laterCount={laterCount} onDone={() => setEditing(false)} />
+      ) : (
+        <div className="group/user flex items-start gap-2">
+          <div className="min-w-0 flex-1 border-l-2 border-river pl-3.5 text-[15px] leading-6 break-words whitespace-pre-wrap">
+            {user.content}
           </div>
-        )}
-      </div>
+          <IconButton
+            label="Edit message"
+            onClick={() => setEditing(true)}
+            disabled={!idle}
+            className="-mt-0.5 size-7 shrink-0 opacity-0 group-hover/user:opacity-100 focus-visible:opacity-100 disabled:invisible"
+          >
+            <Pencil size={14} />
+          </IconButton>
+        </div>
+      )}
+
+      {answer && (
+        <div className="mt-5">
+          {!!answer.dropped && (
+            <p className="mb-3 text-xs text-ink-3">
+              {answer.dropped === 1 ? "1 older message wasn't" : `${answer.dropped} older messages weren't`} sent, to fit{" "}
+              {modelName}'s context window.
+            </p>
+          )}
+          {answer.reasoning && <ReasoningPanel answer={answer} />}
+          {answer.content ? (
+            <Markdown text={answer.content} streaming={streaming} />
+          ) : (
+            streaming && !answer.reasoning && <p className="thinking-label text-[14px]">Waiting for {modelName}</p>
+          )}
+
+          {answer.error && <TurnError answer={answer} modelName={modelName} isLast={isLast} />}
+          {answer.finishReason === "cancelled" && <p className="mt-3 text-xs text-ink-3">Stopped</p>}
+          {answer.finishReason === "length" && (
+            <p className="mt-3 text-xs text-ink-3">
+              The answer hit the maximum length. You can raise it in chat settings.
+            </p>
+          )}
+
+          {/* Failed answers get their actions from the error notice instead. */}
+          {!streaming && !answer.error && (
+            <div className="mt-2 -ml-2 flex items-center gap-0.5">
+              {answer.content && <CopyButton text={answer.content} label="Copy answer" />}
+              {isLast && idle && (
+                <IconButton label="Regenerate" onClick={() => regenerate()}>
+                  <RotateCcw size={15} />
+                </IconButton>
+              )}
+              <span
+                className="ml-1.5 text-xs text-ink-3"
+                title={answer.promptTokens !== null || answer.completionTokens !== null
+                  ? `${answer.promptTokens ?? "?"} tokens in, ${answer.completionTokens ?? "?"} out`
+                  : undefined}
+              >
+                {modelName}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
     </section>
   );
 });
 
-function ReasoningPanel({ turn }: { turn: Turn }) {
-  const thinking = turn.status === "streaming" && !turn.content;
+function EditMessage({ message, laterCount, onDone }: { message: Message; laterCount: number; onDone: () => void }) {
+  const [text, setText] = useState(message.content);
+  const [saving, setSaving] = useState(false);
+  const editAndResend = useStore((s) => s.editAndResend);
+  const input = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    const el = input.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 400)}px`;
+  }, [text]);
+
+  useEffect(() => {
+    const el = input.current;
+    el?.focus();
+    el?.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+
+  const submit = async () => {
+    if (!text.trim() || saving) return;
+    setSaving(true);
+    const ok = await editAndResend(message.id, text);
+    setSaving(false);
+    if (ok) onDone();
+  };
+
+  return (
+    <div className="rounded-[10px] border border-river bg-surface">
+      <label htmlFor={`edit-${message.id}`} className="sr-only">
+        Edit message
+      </label>
+      <textarea
+        id={`edit-${message.id}`}
+        ref={input}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onDone();
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            void submit();
+          }
+        }}
+        className="block w-full resize-none bg-transparent px-3.5 pt-2.5 text-[15px] leading-6 focus:outline-none"
+      />
+      <div className="flex flex-wrap items-center gap-2 px-2 pb-2">
+        <span className="flex-1 pl-1.5 text-xs text-ink-3">
+          {laterCount > 0
+            ? `Sending replaces the answer and removes ${laterCount === 1 ? "the message" : `the ${laterCount} messages`} after it.`
+            : "Sending replaces the answer."}
+        </span>
+        <Button variant="quiet" onClick={onDone}>
+          Cancel
+        </Button>
+        <Button variant="primary" onClick={() => void submit()} disabled={!text.trim() || saving}>
+          Send
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ReasoningPanel({ answer }: { answer: Message }) {
+  const thinking = answer.status === "streaming" && !answer.content;
   // `null` until the user toggles it: open while thinking, then fold away when the answer starts.
   const [open, setOpen] = useState<boolean | null>(null);
   const isOpen = open ?? thinking;
@@ -131,10 +246,10 @@ function ReasoningPanel({ turn }: { turn: Turn }) {
 
   useLayoutEffect(() => {
     if (thinking && body.current) body.current.scrollTop = body.current.scrollHeight;
-  }, [turn.reasoning, thinking]);
+  }, [answer.reasoning, thinking]);
 
-  const end = turn.reasoningEndedAt ?? turn.endedAt;
-  const secs = end ? Math.max(1, Math.round((end - turn.startedAt) / 1000)) : null;
+  const ms = answer.reasoningMs ?? (answer.endedAt ? answer.endedAt - answer.createdAt : null);
+  const secs = ms !== null ? Math.max(1, Math.round(ms / 1000)) : null;
 
   return (
     <div className="mb-4">
@@ -154,18 +269,18 @@ function ReasoningPanel({ turn }: { turn: Turn }) {
           ref={body}
           className="mt-2 max-h-72 overflow-y-auto rounded-lg bg-sediment px-4 py-3 text-[13px] leading-[1.55] break-words whitespace-pre-wrap text-ink-2"
         >
-          {turn.reasoning.trim()}
+          {answer.reasoning?.trim()}
         </div>
       )}
     </div>
   );
 }
 
-function TurnError({ turn, modelName, isLast }: { turn: Turn; modelName: string; isLast: boolean }) {
-  const error = turn.error!;
+function TurnError({ answer, modelName, isLast }: { answer: Message; modelName: string; isLast: boolean }) {
+  const error = answer.error!;
   const models = useStore((s) => s.models);
-  const idle = useStore((s) => s.requestId === null);
-  const retryLast = useStore((s) => s.retryLast);
+  const idle = useStore((s) => !chatBusy(s));
+  const retryLast = useStore((s) => s.regenerate);
   const newChat = useStore((s) => s.newChat);
   const actionable = isLast && idle;
 
@@ -182,9 +297,9 @@ function TurnError({ turn, modelName, isLast }: { turn: Turn; modelName: string;
       // The key screen takes over; after a new key is entered this turn can be retried.
       return <Notice className="mt-3" tone="error" title={errorTitle(error)} actions={actionable && retry()} />;
     case "rate_limited":
-      return <RateLimited turn={turn} actionable={actionable} onRetry={() => retryLast()} />;
+      return <RateLimited answer={answer} actionable={actionable} onRetry={() => retryLast()} />;
     case "model_unavailable": {
-      const others = models.filter((m) => m.id !== turn.modelId).slice(0, 3);
+      const others = models.filter((m) => m.id !== answer.modelId).slice(0, 3);
       return (
         <Notice
           className="mt-3"
@@ -221,12 +336,13 @@ function TurnError({ turn, modelName, isLast }: { turn: Turn; modelName: string;
         />
       );
     case "stream_dropped":
+    case "interrupted":
       return (
         <Notice
           className="mt-3"
-          tone={turn.content ? "warn" : "error"}
-          title={turn.content ? `${errorTitle(error)} What arrived is kept above.` : errorTitle(error)}
-          details={error.message}
+          tone={answer.content ? "warn" : "error"}
+          title={answer.content ? `${errorTitle(error)} What arrived is kept above.` : errorTitle(error)}
+          details={error.kind === "interrupted" ? undefined : error.message}
           actions={actionable && retry("Regenerate")}
         />
       );
@@ -243,8 +359,8 @@ function TurnError({ turn, modelName, isLast }: { turn: Turn; modelName: string;
   }
 }
 
-function RateLimited({ turn, actionable, onRetry }: { turn: Turn; actionable: boolean; onRetry: () => void }) {
-  const until = (turn.endedAt ?? Date.now()) + (turn.error?.retry_after ?? 0) * 1000;
+function RateLimited({ answer, actionable, onRetry }: { answer: Message; actionable: boolean; onRetry: () => void }) {
+  const until = (answer.endedAt ?? Date.now()) + (answer.error?.retry_after ?? 0) * 1000;
   const [now, setNow] = useState(Date.now);
   const left = Math.ceil((until - now) / 1000);
 
@@ -259,7 +375,7 @@ function RateLimited({ turn, actionable, onRetry }: { turn: Turn; actionable: bo
       className="mt-3"
       tone="warn"
       title={left > 0 ? `Too many requests. You can retry in ${left}s.` : "Too many requests. You can retry now."}
-      details={turn.error?.message}
+      details={answer.error?.message}
       actions={
         actionable && (
           <Button onClick={onRetry} disabled={left > 0}>

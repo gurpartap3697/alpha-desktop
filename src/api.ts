@@ -12,7 +12,10 @@ export type ErrorKind =
   | "stream_dropped"
   | "protocol"
   | "no_key"
-  | "storage";
+  | "storage"
+  | "database"
+  | "not_found"
+  | "interrupted";
 
 export interface AppError {
   kind: ErrorKind;
@@ -62,8 +65,76 @@ export interface Usage {
   total_tokens?: number | null;
 }
 
+// src-tauri/src/db.rs
+export interface Params {
+  /** `null` = the model's default. */
+  temperature: number | null;
+  maxTokens: number | null;
+  reasoning: boolean | null;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  modelId: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Search results only: text around the first matching message. */
+  snippet?: string;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  titleStatus: "pending" | "generated" | "fallback" | "user";
+  modelId: string;
+  systemPrompt: string | null;
+  params: Params;
+  createdAt: number;
+  updatedAt: number;
+  messages: Message[];
+}
+
+export type MessageStatus = "streaming" | "complete" | "stopped" | "error";
+
+export interface Message {
+  id: string;
+  conversationId: string;
+  seq: number;
+  role: "user" | "assistant";
+  content: string;
+  reasoning: string | null;
+  modelId: string | null;
+  /** `stopped`: ended early (by the user or a dropped connection) but the partial answer is kept. */
+  status: MessageStatus;
+  error: AppError | null;
+  finishReason: string | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  /** Older messages left out to fit the context window. */
+  dropped: number | null;
+  reasoningMs: number | null;
+  createdAt: number;
+  endedAt: number | null;
+}
+
+export type TurnAction =
+  | { type: "send"; content: string }
+  | { type: "regenerate" }
+  | { type: "edit"; messageId: string; content: string };
+
+export interface TurnRequest {
+  /** `null` starts a new conversation. */
+  conversationId: string | null;
+  action: TurnAction;
+  model: string;
+  systemPrompt: string | null;
+  params: Params;
+}
+
 // src-tauri/src/chat.rs
 export type StreamEvent =
+  | { type: "started"; conversation: ConversationSummary; messages: Message[] }
   | { type: "trimmed"; dropped: number }
   | { type: "content_delta"; text: string }
   | { type: "reasoning_delta"; text: string }
@@ -71,37 +142,39 @@ export type StreamEvent =
   | { type: "done"; finish_reason: string | null }
   | ({ type: "error" } & AppError);
 
-export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
-
-export interface ChatPayload {
-  model: string;
-  messages: ChatMessage[];
-  temperature?: number;
-  maxTokens?: number;
-  /** Omit to use the model's default. Ignored for models without a reasoning toggle. */
-  reasoning?: boolean;
-}
-
 export const authStatus = () => invoke<AuthStatus>("auth_status");
 export const authSetKey = (key: string) => invoke<AuthStatus>("auth_set_key", { key });
 export const authClear = () => invoke<void>("auth_clear");
 export const getAppConfig = () => invoke<ConfigStatus>("get_app_config");
 export const listModels = () => invoke<ModelInfo[]>("list_models");
 
-export function chatStream(
+/** Resolves when the answer has finished; rejects only if nothing was saved. */
+export function chatSend(
   requestId: string,
-  payload: ChatPayload,
+  request: TurnRequest,
   onEvent: (ev: StreamEvent) => void,
 ): Promise<void> {
   const channel = new Channel<StreamEvent>();
   channel.onmessage = onEvent;
-  return invoke<void>("chat_stream", { requestId, payload, onEvent: channel });
+  return invoke<void>("chat_send", { requestId, request, onEvent: channel });
 }
 
 export const chatCancel = (requestId: string) => invoke<void>("chat_cancel", { requestId });
+
+// src-tauri/src/history.rs
+export const conversationsList = (query?: string) =>
+  invoke<ConversationSummary[]>("conversations_list", { query: query || null });
+export const conversationGet = (id: string) => invoke<Conversation>("conversation_get", { id });
+export const conversationUpdate = (id: string, model: string, systemPrompt: string | null, params: Params) =>
+  invoke<void>("conversation_update", { id, model, systemPrompt, params });
+export const conversationRename = (id: string, title: string) =>
+  invoke<ConversationSummary>("conversation_rename", { id, title });
+export const conversationDelete = (id: string) => invoke<void>("conversation_delete", { id });
+export const conversationGenerateTitle = (id: string) =>
+  invoke<ConversationSummary>("conversation_generate_title", { id });
+/** Shows a save dialog. Resolves to the saved path, or `null` if the user cancelled. */
+export const saveMarkdown = (suggestedName: string, content: string) =>
+  invoke<string | null>("save_markdown", { suggestedName, content });
 
 export function isAppError(e: unknown): e is AppError {
   return typeof e === "object" && e !== null && "kind" in e && "message" in e;

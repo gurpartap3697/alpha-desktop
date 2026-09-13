@@ -3,11 +3,14 @@ mod chat;
 mod config;
 mod context;
 mod credentials;
+mod db;
 mod error;
 mod gateway;
+mod history;
 mod models;
 mod sse;
 mod state;
+mod titles;
 
 use tauri::Manager;
 
@@ -15,6 +18,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let gateway = gateway::Gateway::new()?;
             let data_dir = app.path().app_data_dir()?;
@@ -27,8 +31,15 @@ pub fn run() {
             auth::auth_clear,
             config::get_app_config,
             models::list_models,
-            chat::chat_stream,
+            chat::chat_send,
             chat::chat_cancel,
+            history::conversations_list,
+            history::conversation_get,
+            history::conversation_update,
+            history::conversation_rename,
+            history::conversation_delete,
+            history::conversation_generate_title,
+            history::save_markdown,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

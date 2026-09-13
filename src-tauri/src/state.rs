@@ -6,21 +6,32 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{self, AppConfig};
 use crate::credentials::{Credentials, FileStore, KeyringStore};
+use crate::db::Db;
 use crate::error::{AppError, ErrorKind};
 use crate::gateway::Gateway;
 use crate::models::{self, ModelInfo};
 
+pub const HISTORY_FILE: &str = "history.sqlite3";
+
+pub struct ActiveStream {
+    pub token: CancellationToken,
+    /// Known once the turn is saved (a new chat gets its id then).
+    pub conversation_id: Option<String>,
+}
+
 pub struct AppState {
     pub gateway: Gateway,
+    /// Chat history, or why it couldn't be opened.
+    db: Result<Db, AppError>,
     pub credentials: Arc<Credentials>,
-    /// App data directory: config cache and, only when there is no OS keychain, the key file.
+    /// App data directory: history database, config cache and, only when there is no OS keychain, the key file.
     pub data_dir: PathBuf,
     /// Last loaded app config. `None` until the first `get_app_config`.
     pub config: RwLock<Option<AppConfig>>,
     /// Last `list_models` result, by id.
     pub models: RwLock<HashMap<String, ModelInfo>>,
     /// In-flight chat streams by request id.
-    pub streams: Mutex<HashMap<String, CancellationToken>>,
+    pub streams: Mutex<HashMap<String, ActiveStream>>,
 }
 
 impl AppState {
@@ -29,13 +40,35 @@ impl AppState {
             Box::new(KeyringStore),
             Box::new(FileStore::new(data_dir.join("gateway-key"))),
         );
+        Self::with_credentials(gateway, data_dir, credentials)
+    }
+
+    pub fn with_credentials(gateway: Gateway, data_dir: PathBuf, credentials: Credentials) -> Self {
+        let db = Db::open(&data_dir.join(HISTORY_FILE));
+        if let Err(e) = &db {
+            eprintln!("history: can't open {}: {e}", data_dir.join(HISTORY_FILE).display());
+        }
         Self {
             gateway,
+            db,
             credentials: Arc::new(credentials),
             data_dir,
             config: RwLock::new(None),
             models: RwLock::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn db(&self) -> Result<&Db, AppError> {
+        self.db.as_ref().map_err(Clone::clone)
+    }
+
+    /// Cancel any stream answering in this conversation.
+    pub fn cancel_conversation(&self, conversation_id: &str) {
+        for s in self.streams.lock().unwrap().values() {
+            if s.conversation_id.as_deref() == Some(conversation_id) {
+                s.token.cancel();
+            }
         }
     }
 

@@ -1,8 +1,8 @@
 use reqwest::StatusCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Error categories the UI designs a state for (see "Error states" in plan.md).
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     /// Connect failure, TLS failure or timeout — typically off VPN or gateway down.
@@ -21,14 +21,20 @@ pub enum ErrorKind {
     NoKey,
     /// The OS credential store (or the fallback file) failed.
     Storage,
+    /// Chat history (SQLite) couldn't be read or written.
+    Database,
+    /// A conversation or message that no longer exists.
+    NotFound,
+    /// The app was closed while the answer was streaming.
+    Interrupted,
 }
 
-#[derive(Debug, Clone, Serialize, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, thiserror::Error)]
 #[error("{message}")]
 pub struct AppError {
     pub kind: ErrorKind,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after: Option<u64>,
 }
 
@@ -58,6 +64,15 @@ impl AppError {
             _ => ErrorKind::Server,
         };
         Self { kind, message, retry_after }
+    }
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(e: rusqlite::Error) -> Self {
+        match e {
+            rusqlite::Error::QueryReturnedNoRows => Self::new(ErrorKind::NotFound, "Not found"),
+            e => Self::new(ErrorKind::Database, error_chain(&e)),
+        }
     }
 }
 

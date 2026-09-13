@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use futures_util::StreamExt;
 use reqwest::Response;
 use serde::{Deserialize, Serialize};
@@ -6,11 +8,15 @@ use tauri::{ipc::Channel, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::context;
+use crate::db::{AnswerUpdate, ConversationSummary, Db, Message, TurnRequest};
 use crate::error::{AppError, ErrorKind};
 use crate::gateway::{check, Gateway};
 use crate::models::ModelInfo;
 use crate::sse::SseParser;
-use crate::state::AppState;
+use crate::state::{ActiveStream, AppState};
+
+/// How often a streaming answer is written to the database.
+const SAVE_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ChatMessage {
@@ -18,11 +24,9 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct ChatPayload {
-    pub model: String,
-    /// Full conversation, oldest first, optionally starting with a system message.
+    /// Conversation to send, oldest first, optionally starting with a system message.
     /// Trimmed to the model's context window before sending.
     pub messages: Vec<ChatMessage>,
     pub temperature: Option<f64>,
@@ -43,6 +47,9 @@ pub struct Usage {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
+    /// First event: the saved conversation and the messages created or changed for this turn
+    /// (the last one is the answer being streamed).
+    Started { conversation: ConversationSummary, messages: Vec<Message> },
     /// Sent before any delta when older messages were left out to fit the context window.
     Trimmed { dropped: usize },
     ContentDelta { text: String },
@@ -65,6 +72,7 @@ pub fn build_body(
     temperature: Option<f64>,
     max_tokens: Option<u32>,
     extra: Option<&Map<String, Value>>,
+    stream: bool,
 ) -> Result<Value, AppError> {
     if model.trim().is_empty() {
         return Err(AppError::new(ErrorKind::BadRequest, "No model selected"));
@@ -85,8 +93,10 @@ pub fn build_body(
     let obj = body.as_object_mut().expect("body is an object");
     obj.insert("model".into(), json!(model));
     obj.insert("messages".into(), json!(messages));
-    obj.insert("stream".into(), json!(true));
-    obj.insert("stream_options".into(), json!({ "include_usage": true }));
+    obj.insert("stream".into(), json!(stream));
+    if stream {
+        obj.insert("stream_options".into(), json!({ "include_usage": true }));
+    }
     if let Some(t) = temperature {
         obj.insert("temperature".into(), json!(t));
     }
@@ -192,31 +202,159 @@ impl Drop for StreamGuard<'_> {
     }
 }
 
-/// Stream a chat completion. Always resolves `Ok`; outcomes (including errors) arrive as events,
-/// and the last event is always `done` or `error`.
+/// Save the user's action (new message, regenerate, or edit), then stream and save the answer.
+///
+/// Fails only if nothing was saved (invalid request, chat busy or missing, database error). Otherwise
+/// resolves `Ok`: the first event is `started`, the last is `done` or `error`, and the answer's final
+/// state is in the database before the last event is sent.
 #[tauri::command]
-pub async fn chat_stream(
+pub async fn chat_send(
     state: State<'_, AppState>,
     request_id: String,
-    payload: ChatPayload,
+    request: TurnRequest,
     on_event: Channel<StreamEvent>,
 ) -> Result<(), AppError> {
-    let send = |ev: StreamEvent| on_event.send(ev).is_ok();
+    send_turn(&state, request_id, request, |ev| on_event.send(ev).is_ok()).await
+}
 
+/// `chat_send` without the Tauri plumbing. `send` returns false once nobody is listening.
+pub async fn send_turn(
+    state: &AppState,
+    request_id: String,
+    request: TurnRequest,
+    send: impl FnMut(StreamEvent) -> bool,
+) -> Result<(), AppError> {
+    let db = state.db()?;
     let token = CancellationToken::new();
-    state.streams.lock().unwrap().insert(request_id.clone(), token.clone());
-    let _guard = StreamGuard { state: &state, request_id };
-
-    let key = match state.api_key().await {
-        Ok(k) => k,
-        Err(e) => {
-            send(e.into());
-            return Ok(());
+    {
+        let mut streams = state.streams.lock().unwrap();
+        if let Some(cid) = &request.conversation_id {
+            if streams.values().any(|s| s.conversation_id.as_deref() == Some(cid)) {
+                return Err(AppError::new(ErrorKind::BadRequest, "This chat is still answering"));
+            }
         }
-    };
-    let model = state.model(&payload.model);
-    run_chat(&state.gateway, &key, &model, payload, &token, send).await;
+        streams.insert(request_id.clone(),
+                       ActiveStream { token: token.clone(), conversation_id: request.conversation_id.clone() });
+    }
+    let _guard = StreamGuard { state, request_id: request_id.clone() };
+
+    let prepared = db.prepare_turn(&request)?;
+    if let Some(s) = state.streams.lock().unwrap().get_mut(&request_id) {
+        s.conversation_id = Some(prepared.conversation.id.clone());
+    }
+    let answer_id = prepared.answer().id.clone();
+    let mut recorder = Recorder::new(db, answer_id, send);
+    recorder.forward(StreamEvent::Started { conversation: prepared.conversation, messages: prepared.changed });
+
+    match state.api_key().await {
+        Err(e) => {
+            recorder.event(e.into());
+        }
+        Ok(key) => {
+            let model = state.model(&request.model);
+            let payload = ChatPayload {
+                temperature: request.params.temperature.or(Some(model.temperature)),
+                max_tokens: request.params.max_tokens,
+                reasoning: request.params.reasoning,
+                messages: prepared.history,
+            };
+            run_chat(&state.gateway, &key, &model, payload, &token, |ev| recorder.event(ev)).await;
+        }
+    }
+    recorder.close();
     Ok(())
+}
+
+/// Saves a streamed answer as events pass through: the text periodically, the final state before
+/// the last event is forwarded.
+struct Recorder<'a, F: FnMut(StreamEvent) -> bool> {
+    db: &'a Db,
+    id: String,
+    send: F,
+    answer: AnswerUpdate,
+    started: Instant,
+    last_save: Instant,
+    unsaved: bool,
+    finished: bool,
+}
+
+impl<'a, F: FnMut(StreamEvent) -> bool> Recorder<'a, F> {
+    fn new(db: &'a Db, id: String, send: F) -> Self {
+        let now = Instant::now();
+        Self { db, id, send, answer: AnswerUpdate::default(), started: now, last_save: now, unsaved: false, finished: false }
+    }
+
+    fn forward(&mut self, ev: StreamEvent) -> bool {
+        (self.send)(ev)
+    }
+
+    fn event(&mut self, ev: StreamEvent) -> bool {
+        let a = &mut self.answer;
+        match &ev {
+            StreamEvent::Started { .. } => {}
+            StreamEvent::Trimmed { dropped } => a.dropped = Some(*dropped),
+            StreamEvent::ReasoningDelta { text } => {
+                a.reasoning.push_str(text);
+                self.unsaved = true;
+            }
+            StreamEvent::ContentDelta { text } => {
+                if a.content.is_empty() && !a.reasoning.is_empty() {
+                    a.reasoning_ms = Some(self.started.elapsed().as_millis() as u64);
+                }
+                a.content.push_str(text);
+                self.unsaved = true;
+            }
+            StreamEvent::Usage { usage } => {
+                a.prompt_tokens = usage.prompt_tokens;
+                a.completion_tokens = usage.completion_tokens;
+            }
+            StreamEvent::Done { finish_reason } => {
+                let stopped = finish_reason.as_deref() == Some("cancelled");
+                a.status = Some(if stopped { "stopped" } else { "complete" });
+                a.finish_reason = finish_reason.clone();
+                self.finish();
+            }
+            StreamEvent::Error { kind, message, retry_after } => {
+                // A dropped connection keeps what arrived, like a stop.
+                let partial = *kind == ErrorKind::StreamDropped && !a.content.is_empty();
+                a.status = Some(if partial { "stopped" } else { "error" });
+                a.error = Some(AppError { kind: *kind, message: message.clone(), retry_after: *retry_after });
+                self.finish();
+            }
+        }
+        if self.unsaved && !self.finished && self.last_save.elapsed() >= SAVE_INTERVAL {
+            self.unsaved = false;
+            self.last_save = Instant::now();
+            if let Err(e) = self.db.save_progress(&self.id, &self.answer.content, &self.answer.reasoning) {
+                eprintln!("history: saving answer progress failed: {e}");
+            }
+        }
+        self.forward(ev)
+    }
+
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let a = &mut self.answer;
+        if a.reasoning_ms.is_none() && !a.reasoning.is_empty() {
+            a.reasoning_ms = Some(self.started.elapsed().as_millis() as u64);
+        }
+        if let Err(e) = self.db.finish_answer(&self.id, &self.answer) {
+            eprintln!("history: saving answer failed: {e}");
+        }
+    }
+
+    /// The stream ended without a final event (the window closed): keep what arrived.
+    fn close(&mut self) {
+        if !self.finished {
+            let a = &mut self.answer;
+            a.status = Some(if a.content.is_empty() { "error" } else { "stopped" });
+            a.error = Some(AppError::new(ErrorKind::Interrupted, "The answer was interrupted"));
+            self.finish();
+        }
+    }
 }
 
 fn cancelled() -> StreamEvent {
@@ -240,7 +378,7 @@ pub async fn run_chat(
     let mut retried = false;
 
     loop {
-        let body = match build_body(&model.id, &messages, payload.temperature, Some(max_tokens), extra) {
+        let body = match build_body(&model.id, &messages, payload.temperature, Some(max_tokens), extra, true) {
             Ok(b) => b,
             Err(e) => {
                 send(e.into());
@@ -323,10 +461,27 @@ async fn pump(resp: Response, token: &CancellationToken, mut send: impl FnMut(St
     }
 }
 
+/// A non-streaming completion, for short internal requests such as titles.
+pub async fn complete(
+    gateway: &Gateway,
+    key: &str,
+    model: &ModelInfo,
+    messages: &[ChatMessage],
+    max_tokens: u32,
+    reasoning: Option<bool>,
+) -> Result<String, AppError> {
+    let body = build_body(&model.id, messages, Some(0.3), Some(max_tokens), model.reasoning_body(reasoning), false)?;
+    let req = gateway.post("/v1/chat/completions", key).timeout(Duration::from_secs(30)).json(&body);
+    let resp = check(req.send().await?).await?;
+    let v: Value = resp.json().await
+        .map_err(|e| AppError::new(ErrorKind::Protocol, format!("Unexpected completion response: {e}")))?;
+    Ok(v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_owned())
+}
+
 #[tauri::command]
 pub fn chat_cancel(state: State<'_, AppState>, request_id: String) {
-    if let Some(token) = state.streams.lock().unwrap().get(&request_id) {
-        token.cancel();
+    if let Some(s) = state.streams.lock().unwrap().get(&request_id) {
+        s.token.cancel();
     }
 }
 
@@ -383,24 +538,79 @@ mod tests {
     fn body_merges_extra_but_core_fields_win() {
         let extra: Map<String, Value> = serde_json::from_str(
             r#"{"chat_template_kwargs":{"enable_thinking":false},"stream":false,"model":"evil"}"#).unwrap();
-        let body = build_body("qwen", &[user("hi")], Some(0.2), None, Some(&extra)).unwrap();
+        let body = build_body("qwen", &[user("hi")], Some(0.2), None, Some(&extra), true).unwrap();
         assert_eq!(body["model"], "qwen");
         assert_eq!(body["stream"], true);
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["messages"], json!([{ "role": "user", "content": "hi" }]));
         assert!(body.get("max_tokens").is_none());
-        assert!(build_body("qwen", &[], None, None, None).is_err());
-        assert!(build_body("qwen", &[ChatMessage { role: "tool".into(), content: "".into() }], None, None, None).is_err());
+        assert!(build_body("qwen", &[], None, None, None, true).is_err());
+        assert!(build_body("qwen", &[ChatMessage { role: "tool".into(), content: "".into() }], None, None, None, true).is_err());
+        let plain = build_body("qwen", &[user("hi")], None, Some(20), None, false).unwrap();
+        assert_eq!((plain["stream"].clone(), plain.get("stream_options")), (json!(false), None));
     }
 
     #[test]
-    fn payload_shape_from_ui() {
-        let p: ChatPayload = serde_json::from_str(
-            r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}],"maxTokens":64,"reasoning":false}"#).unwrap();
-        assert_eq!((p.max_tokens, p.reasoning, p.temperature), (Some(64), Some(false), None));
+    fn request_shape_from_ui() {
+        use crate::db::TurnAction;
+        let r: TurnRequest = serde_json::from_str(r#"{"conversationId":"c1","model":"qwen","systemPrompt":null,
+            "action":{"type":"edit","messageId":"m1","content":"hi"},
+            "params":{"temperature":null,"maxTokens":64,"reasoning":false}}"#).unwrap();
+        assert!(matches!(r.action, TurnAction::Edit { ref message_id, .. } if message_id == "m1"));
+        assert_eq!((r.params.max_tokens, r.params.reasoning, r.params.temperature), (Some(64), Some(false), None));
+        let r: TurnRequest = serde_json::from_str(
+            r#"{"conversationId":null,"model":"qwen","action":{"type":"regenerate"}}"#).unwrap();
+        assert!(matches!(r.action, TurnAction::Regenerate) && r.conversation_id.is_none());
         let ev = serde_json::to_value(StreamEvent::Trimmed { dropped: 2 }).unwrap();
         assert_eq!(ev, json!({ "type": "trimmed", "dropped": 2 }));
+    }
+
+    fn record(events: Vec<StreamEvent>) -> (crate::db::Message, usize) {
+        use crate::db::{Params, TurnAction};
+        let db = Db::open_in_memory();
+        let t = db.prepare_turn(&TurnRequest {
+            conversation_id: None, action: TurnAction::Send { content: "hi".into() }, model: "qwen".into(),
+            system_prompt: None, params: Params::default(),
+        }).unwrap();
+        let mut forwarded = 0;
+        let mut rec = Recorder::new(&db, t.answer().id.clone(), |_| { forwarded += 1; true });
+        for ev in events {
+            rec.event(ev);
+        }
+        rec.close();
+        drop(rec);
+        (db.get(&t.conversation.id).unwrap().messages.pop().unwrap(), forwarded)
+    }
+
+    #[test]
+    fn recorder_saves_final_states() {
+        let delta = |t: &str| StreamEvent::ContentDelta { text: t.into() };
+        let (m, n) = record(vec![
+            StreamEvent::Trimmed { dropped: 2 },
+            StreamEvent::ReasoningDelta { text: "hmm".into() },
+            delta("Hel"), delta("lo"),
+            StreamEvent::Usage { usage: Usage { prompt_tokens: Some(3), completion_tokens: Some(2), total_tokens: None } },
+            StreamEvent::Done { finish_reason: Some("stop".into()) },
+        ]);
+        assert_eq!(n, 6);
+        assert_eq!((m.status.as_str(), m.content.as_str(), m.reasoning.as_deref()), ("complete", "Hello", Some("hmm")));
+        assert_eq!((m.dropped, m.completion_tokens, m.finish_reason.as_deref()), (Some(2), Some(2), Some("stop")));
+        assert!(m.reasoning_ms.is_some());
+
+        let (m, _) = record(vec![delta("part"), StreamEvent::Done { finish_reason: Some("cancelled".into()) }]);
+        assert_eq!((m.status.as_str(), m.content.as_str()), ("stopped", "part"));
+
+        let (m, _) = record(vec![delta("part"),
+            AppError::new(ErrorKind::StreamDropped, "closed").into()]);
+        assert_eq!((m.status.as_str(), m.error.unwrap().kind), ("stopped", ErrorKind::StreamDropped));
+
+        let (m, _) = record(vec![AppError { kind: ErrorKind::RateLimited, message: "slow down".into(), retry_after: Some(7) }.into()]);
+        assert_eq!(m.status, "error");
+        assert_eq!(m.error.unwrap().retry_after, Some(7));
+
+        let (m, _) = record(vec![delta("cut off")]);
+        assert_eq!((m.status.as_str(), m.error.unwrap().kind), ("stopped", ErrorKind::Interrupted));
     }
 
     /// End-to-end against a running OpenAI-compatible server. Skipped unless ALPH_TEST_GATEWAY is set.
@@ -443,7 +653,7 @@ mod tests {
 
         async fn collect(gw: &Gateway, key: &str, model: &str, messages: Vec<ChatMessage>, reasoning: Option<bool>,
                          token: &CancellationToken) -> Vec<StreamEvent> {
-            let payload = ChatPayload { model: model.into(), messages, temperature: None, max_tokens: None, reasoning };
+            let payload = ChatPayload { messages, temperature: None, max_tokens: None, reasoning };
             let mut evs = Vec::new();
             run_chat(gw, key, &model_info(model), payload, token, |ev| { evs.push(ev); true }).await;
             evs
@@ -540,6 +750,67 @@ mod tests {
             assert_eq!(last_err(&run("/error 429").await), (ErrorKind::RateLimited, Some(7)));
             assert_eq!(last_err(&run("/error 401").await).0, ErrorKind::Unauthorized);
             assert_eq!(last_err(&run("/drop").await).0, ErrorKind::StreamDropped);
+        }
+
+        /// Six long turns through the whole command path with a small context window: every answer
+        /// streams, later ones leave out older messages, and everything is on disk afterwards.
+        #[tokio::test]
+        async fn live_long_conversation_is_saved_and_trimmed() {
+            use crate::credentials::{Credentials, FileStore};
+            use crate::db::{Params, TurnAction};
+            use crate::state::HISTORY_FILE;
+
+            let Some(l) = setup() else { return };
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = Credentials::new(
+                Box::new(FileStore::new(dir.path().join("k1"))),
+                Box::new(FileStore::new(dir.path().join("k2"))),
+            );
+            credentials.save(&l.key).unwrap();
+            let state = AppState::with_credentials(l.gw, dir.path().to_owned(), credentials);
+            let mut info = model_info(&l.model);
+            (info.context_window, info.max_output_tokens) = (1200, 200);
+            state.models.write().unwrap().insert(l.model.clone(), info);
+
+            let mut conversation_id = None;
+            for i in 0..6 {
+                let request = TurnRequest {
+                    conversation_id: conversation_id.clone(),
+                    action: TurnAction::Send {
+                        content: format!("Message {i}. {}\nReply with just the word OK.", "Some filler text. ".repeat(55)),
+                    },
+                    model: l.model.clone(),
+                    system_prompt: Some("Be brief.".into()),
+                    params: Params { temperature: None, max_tokens: Some(100), reasoning: Some(false) },
+                };
+                let mut evs = Vec::new();
+                send_turn(&state, format!("r{i}"), request, |ev| { evs.push(ev); true }).await.unwrap();
+                let Some(StreamEvent::Started { conversation, .. }) = evs.first() else { panic!("{:?}", evs.first()) };
+                conversation_id = Some(conversation.id.clone());
+                println!("turn {i}: {:?} / {:?}", evs.get(1), evs.last());
+                assert!(finished(&evs), "turn {i} ended with {:?}", evs.last());
+            }
+            assert!(state.streams.lock().unwrap().is_empty());
+            drop(state);
+
+            let db = Db::open(&dir.path().join(HISTORY_FILE)).unwrap();
+            let c = db.get(conversation_id.as_deref().unwrap()).unwrap();
+            assert_eq!(c.messages.len(), 12);
+            assert!(c.messages.iter().all(|m| m.status == "complete" && !m.content.is_empty()), "{:#?}", c.messages);
+            assert!(c.messages.last().unwrap().dropped.unwrap_or(0) > 0, "expected older messages to be left out");
+        }
+
+        #[tokio::test]
+        async fn live_title() {
+            let Some(l) = setup() else { return };
+            let input = crate::db::TitleInput {
+                model_id: l.model.clone(),
+                question: "How do I make a Docker container reach a service running on my Mac?".into(),
+                answer: "Use host.docker.internal as the hostname instead of localhost.".into(),
+            };
+            let title = crate::titles::generate(&l.gw, &l.key, &model_info(&l.model), &input).await.unwrap();
+            println!("title: {title:?}");
+            assert!(title.is_some_and(|t| !t.is_empty() && t.chars().count() <= 81));
         }
 
         #[tokio::test]

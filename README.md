@@ -4,7 +4,7 @@ Desktop chat client for the org's self-hosted models (vLLM behind a LiteLLM gate
 
 ```
 src/          React UI
-src-tauri/    Rust core: gateway client, SSE streaming, commands
+src-tauri/    Rust core: gateway client, SSE streaming, chat history (SQLite), commands
 gateway/      docker-compose for LiteLLM + Postgres + Caddy, mock vLLM, probe/key scripts
 .github/      CI: tests + unsigned builds for macOS, Windows, Linux
 ```
@@ -41,13 +41,15 @@ The mock also serves `gateway/public/app/config.json` at `/app/config.json`, as 
 npm run dev   # open http://localhost:1420
 ```
 
-Outside Tauri, a fake backend (`src/dev/mockBackend.ts`, dev builds only) stands in for the Rust commands. Start states: `?scenario=no_key`, `rejected`, `unreachable`, `update`, `announcement`, `file_storage`. The key `bad` is rejected. The messages `/error 429|401|404|500|context`, `/drop`, `/slow` and `/unreachable` trigger the matching states.
+Outside Tauri, a fake backend (`src/dev/mockBackend.ts`, dev builds only) stands in for the Rust commands. Start states: `?scenario=no_key`, `rejected`, `unreachable`, `update`, `announcement`, `file_storage`, `history_broken`, and `fresh` (empty history). The key `bad` is rejected. The messages `/error 429|401|404|500|context`, `/drop`, `/slow` and `/unreachable` trigger the matching states.
+
+The fake keeps chat history in the browser's `localStorage` with a few sample chats, so reloading the page behaves like restarting the app. Reloading while an answer streams shows the "closed before the answer finished" state.
 
 ### Where things are stored
 
 - API key: macOS Keychain, Windows Credential Manager or Linux Secret Service (service `com.alph.desktop`). If none is available it goes to a `0600` file `gateway-key` in the app data directory, and the app says so. Unsigned dev builds on macOS may ask for Keychain access after each rebuild.
 - Last good app config: `app-config.json` in the app data directory.
-- Conversations: not saved yet (Phase 2).
+- Chat history: `history.sqlite3` in the app data directory (macOS `~/Library/Application Support/com.alph.desktop`, Windows `%APPDATA%\com.alph.desktop`, Linux `~/.local/share/com.alph.desktop`). Only the Rust core opens it. The webview gets typed commands, not SQL. Answers are written as they stream (about every 0.75 s). Any answer still marked as streaming at startup was cut off by the app closing and is marked as such. Schema migrations are in `src-tauri/src/db.rs`, and the version is tracked with `PRAGMA user_version`. An older app refuses to open history written by a newer one.
 
 ## Test
 
@@ -72,6 +74,19 @@ CI (`.github/workflows/build.yml`) builds unsigned bundles on native runners:
 - Linux: AppImage, `.deb` and `.rpm`
 
 Set the repository variable `ALPH_GATEWAY_URL` so CI builds point at the real gateway.
+
+## Phase 2 checklist
+
+Run on each OS:
+
+- [ ] Send a few messages, quit the app, reopen it: the chats are in the sidebar and open with their model, system prompt and settings
+- [ ] Quit while an answer is streaming: after reopening, the partial answer is kept and marked as interrupted, with Regenerate
+- [ ] A new chat gets a short generated title after its first answer. If generation fails (e.g. a model that can't switch thinking off), the start of the first message stays as the title
+- [ ] Rename (menu or double-click), delete (with confirmation), and search by title and by message text; search results show the matching text
+- [ ] Regenerate the last answer, including with another model from the "model unavailable" notice. Editing an earlier message removes the messages after it
+- [ ] Export as Markdown opens a save dialog and writes a readable file (thinking folded in `<details>`)
+- [ ] Start an answer, switch to another chat and back: it kept streaming, and the sidebar shows a dot while it runs
+- [ ] A long conversation keeps working past the model's context window ("N older messages weren't sent")
 
 ## Phase 1 checklist
 
