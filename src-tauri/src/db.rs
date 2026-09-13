@@ -209,6 +209,8 @@ impl Db {
 
     fn init(mut conn: Connection) -> Result<Self, AppError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Deleted chats are overwritten on disk, not just unlinked.
+        conn.pragma_update(None, "secure_delete", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut conn)?;
         let recovered = recover_interrupted(&conn)?;
@@ -309,6 +311,64 @@ impl Db {
 
     pub fn delete(&self, id: &str) -> Result<(), AppError> {
         self.conn().execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn count(&self) -> Result<u64, AppError> {
+        Ok(self.conn().query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get::<_, i64>(0))? as u64)
+    }
+
+    /// Conversations with no activity since `cutoff` (ms).
+    pub fn count_inactive(&self, cutoff: i64) -> Result<u64, AppError> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM conversations WHERE updated_at < ?1", [cutoff], |r| r.get::<_, i64>(0))? as u64)
+    }
+
+    /// Delete conversations with no activity since `cutoff` (ms), except those in `keep`.
+    /// Returns the ids deleted.
+    pub fn delete_inactive(&self, cutoff: i64, keep: &[String]) -> Result<Vec<String>, AppError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM conversations WHERE updated_at < ?1")?;
+            let rows = stmt.query_map([cutoff], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?.into_iter().filter(|id| !keep.contains(id)).collect()
+        };
+        for id in &ids {
+            tx.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// Delete every conversation, then compact the file so nothing is left in free pages or the WAL.
+    pub fn delete_all(&self) -> Result<u64, AppError> {
+        let conn = self.conn();
+        let n = conn.execute("DELETE FROM conversations", [])?;
+        conn.execute_batch("VACUUM")?;
+        // Returns a row; in-memory databases (tests) have no WAL and report busy = 0 as well.
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(n as u64)
+    }
+
+    /// Everything in the `settings` table, as stored.
+    pub fn settings_rows(&self) -> Result<Vec<(String, String)>, AppError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn put_settings(&self, rows: &[(String, String)]) -> Result<(), AppError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for (key, value) in rows {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -876,6 +936,47 @@ mod tests {
         let orphans: i64 = db.conn().query_row(
             "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1", [&t1.conversation.id], |r| r.get(0)).unwrap();
         assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn deletes_inactive_and_all() {
+        let db = Db::open_in_memory();
+        let ids: Vec<String> = (0..3).map(|i| db.prepare_turn(&send(None, &format!("chat {i}"))).unwrap().conversation.id).collect();
+        let day = 86_400_000;
+        let now = now_ms();
+        for (id, age) in ids.iter().zip([0, 10 * day, 40 * day]) {
+            db.conn().execute("UPDATE conversations SET updated_at = ?2 WHERE id = ?1", params![id, now - age]).unwrap();
+        }
+        assert_eq!(db.count_inactive(now - 30 * day).unwrap(), 1);
+        assert_eq!(db.count_inactive(now - 7 * day).unwrap(), 2);
+
+        // The kept one (e.g. still answering) survives even though it's old.
+        assert_eq!(db.delete_inactive(now - 7 * day, &[ids[2].clone()]).unwrap(), [ids[1].clone()]);
+        assert_eq!(db.count().unwrap(), 2);
+
+        db.put_settings(&[("theme".into(), "\"dark\"".into())]).unwrap();
+        assert_eq!(db.delete_all().unwrap(), 2);
+        assert_eq!(db.count().unwrap(), 0);
+        let messages: i64 = db.conn().query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+        assert_eq!(messages, 0);
+        assert_eq!(db.settings_rows().unwrap(), [("theme".to_string(), "\"dark\"".to_string())], "settings are kept");
+    }
+
+    #[test]
+    fn delete_all_on_a_file_leaves_no_text_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.sqlite3");
+        let db = Db::open(&path).unwrap();
+        for i in 0..20 {
+            let t = db.prepare_turn(&send(None, &format!("secret-marker question {i}"))).unwrap();
+            answer(&db, &t.answer().id, &"secret-marker answer ".repeat(50));
+        }
+        db.delete_all().unwrap();
+        drop(db);
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            assert!(!bytes.windows(13).any(|w| w == b"secret-marker"));
+        }
     }
 
     #[test]

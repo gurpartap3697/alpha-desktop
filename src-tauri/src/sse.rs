@@ -111,6 +111,16 @@ mod tests {
     }
 
     #[test]
+    fn accepts_data_without_a_space_and_a_split_blank_line() {
+        let mut p = SseParser::new();
+        assert!(p.push(b"data:{\"b\":2}\n").is_empty());
+        assert_eq!(p.push(b"\ndata:[DONE]\n"), vec!["{\"b\":2}"]);
+        assert_eq!(p.push(b"\n"), vec!["[DONE]"]);
+        // A blank line with no data pending isn't an event.
+        assert!(p.push(b"\n\n").is_empty());
+    }
+
+    #[test]
     fn finish_flushes_unterminated_event() {
         let mut p = SseParser::new();
         assert!(p.push(b"data: tail").is_empty());

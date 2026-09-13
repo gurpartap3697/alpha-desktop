@@ -30,3 +30,7 @@ gateway/caddy/certs/*
 __pycache__/
 
 src-tauri/.env
+
+# Playwright
+test-results/
+playwright-report/

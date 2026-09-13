@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   AppError,
+  AppSettings,
   AuthStatus,
   ConfigStatus,
   ConversationSummary,
@@ -20,9 +21,14 @@ import {
   conversationRename,
   conversationUpdate,
   conversationsList,
+  defaultAppSettings,
   getAppConfig,
+  historyDeleteAll,
+  historyPrune,
   listModels,
   saveMarkdown,
+  settingsGet,
+  settingsUpdate,
   toAppError,
 } from "./api";
 import { exportFileName, toMarkdown } from "./export";
@@ -74,7 +80,15 @@ interface Store {
   modelsStatus: "idle" | "loading" | "ok" | "error";
   modelsError: AppError | null;
 
+  /** App-wide settings; the defaults until loaded. */
+  settings: AppSettings;
+  /** Loading finished, successfully or not. Until then the startup theme stays as it is. */
+  settingsLoaded: boolean;
+  settingsError: AppError | null;
+  settingsOpen: boolean;
+
   conversations: ConversationSummary[];
+  conversationsStatus: "loading" | "ok" | "error";
   historyError: AppError | null;
   search: string;
   /** `null` when not searching. */
@@ -97,6 +111,14 @@ interface Store {
   submitKey(key: string): Promise<void>;
   signOut(): Promise<void>;
   loadModels(): Promise<void>;
+
+  setSettingsOpen(open: boolean): void;
+  updateAppSettings(patch: Partial<AppSettings>): void;
+  /** Save the auto-delete setting and apply it right away. Resolves to the number of chats deleted, or `null` on failure. */
+  setRetention(days: number | null): Promise<number | null>;
+  /** Apply the auto-delete setting, sparing the open chat. */
+  pruneHistory(): Promise<void>;
+  deleteAllHistory(): Promise<boolean>;
 
   loadConversations(): Promise<void>;
   setSearch(query: string): void;
@@ -162,6 +184,22 @@ const replaceTitle = (list: ConversationSummary[] | null, c: ConversationSummary
 
 const isKeyError = (e: AppError) => e.kind === "unauthorized" || e.kind === "no_key";
 
+/** Settings for a chat started now: the app defaults, with the model falling back to the one in use. */
+const newChatSettings = (s: Pick<Store, "settings" | "models" | "chat">): ChatSettings => {
+  const d = s.settings;
+  const defaultAvailable = d.defaultModel && (s.models.length === 0 || s.models.some((m) => m.id === d.defaultModel));
+  return {
+    modelId: (defaultAvailable && d.defaultModel) || activeModel(s)?.id || s.chat.settings.modelId,
+    systemPrompt: d.systemPrompt ?? "",
+    params: { ...defaultParams(), ...d.params },
+  };
+};
+
+const isUntouchedDraft = (s: Pick<Store, "settings" | "models" | "chat">) =>
+  s.chat.id === null &&
+  s.chat.messages.length === 0 &&
+  JSON.stringify(s.chat.settings) === JSON.stringify(newChatSettings(s));
+
 export const useStore = create<Store>()((set, get) => {
   // Deltas are buffered and flushed once per animation frame instead of re-rendering per token.
   const pending = new Map<string, { reasoning: string; content: string }>();
@@ -170,6 +208,44 @@ export const useStore = create<Store>()((set, get) => {
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let saveSettings: (() => void) | null = null;
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let appSettingsTimer: ReturnType<typeof setTimeout> | undefined;
+  const dirtySettings = new Set<keyof AppSettings>();
+
+  const flushAppSettings = async () => {
+    clearTimeout(appSettingsTimer);
+    if (!dirtySettings.size) return true;
+    const current = get().settings;
+    const patch = Object.fromEntries([...dirtySettings].map((k) => [k, current[k]])) as Partial<AppSettings>;
+    dirtySettings.clear();
+    try {
+      await settingsUpdate(patch);
+      return true;
+    } catch (e) {
+      const error = toAppError(e);
+      get().showToast({ tone: "error", text: "Couldn't save settings.", details: error.message });
+      // Show what's actually saved.
+      settingsGet().then((settings) => set({ settings }), () => {});
+      return false;
+    }
+  };
+
+  // Don't lose a change made just before the window closes or reloads.
+  window.addEventListener("pagehide", () => {
+    flushSettings();
+    void flushAppSettings();
+  });
+
+  /** Remove deleted chats from the lists; a deleted open chat is replaced by a new one. */
+  const forgetChats = (ids: string[]) => {
+    if (!ids.length) return;
+    const gone = new Set(ids);
+    if (get().chat.id && gone.has(get().chat.id!)) get().newChat();
+    set((s) => ({
+      conversations: s.conversations.filter((c) => !gone.has(c.id)),
+      results: s.results && s.results.filter((c) => !gone.has(c.id)),
+      live: Object.fromEntries(Object.entries(s.live).filter(([, m]) => !gone.has(m.conversationId))),
+    }));
+  };
 
   /** Update an answer that is (or was) streaming this session, both in `live` and on screen. */
   const patchLive = (id: string, fn: (m: Message) => Partial<Message>) =>
@@ -382,7 +458,12 @@ export const useStore = create<Store>()((set, get) => {
     models: [],
     modelsStatus: "idle",
     modelsError: null,
+    settings: defaultAppSettings(),
+    settingsLoaded: false,
+    settingsError: null,
+    settingsOpen: false,
     conversations: [],
+    conversationsStatus: "loading",
     historyError: null,
     search: "",
     results: null,
@@ -396,8 +477,28 @@ export const useStore = create<Store>()((set, get) => {
 
     async boot() {
       try {
-        const [auth, config] = await Promise.all([authStatus(), getAppConfig()]);
-        set({ auth, config, bootError: null });
+        const [auth, config, settings] = await Promise.all([
+          authStatus(),
+          getAppConfig(),
+          settingsGet().catch((e) => {
+            set({ settingsError: toAppError(e) });
+            return null;
+          }),
+        ]);
+        // One update, so the theme never passes through the defaults.
+        set((s) =>
+          settings
+            ? {
+                auth,
+                config,
+                bootError: null,
+                settingsLoaded: true,
+                settings,
+                settingsError: null,
+                chat: isUntouchedDraft(s) ? { ...s.chat, settings: newChatSettings({ ...s, settings }) } : s.chat,
+              }
+            : { auth, config, bootError: null, settingsLoaded: true },
+        );
         if (config.updateRequired) return set({ phase: "update_required" });
         if (!auth.hasKey) return set({ phase: "signed_out" });
         set({ phase: "ready" });
@@ -453,15 +554,16 @@ export const useStore = create<Store>()((set, get) => {
         const conversations = await conversationsList();
         set((s) => ({
           conversations,
+          conversationsStatus: "ok",
           historyError: null,
-          // A fresh start continues with the model used most recently.
+          // Without a default model, a fresh start continues with the model used most recently.
           chat:
             s.chat.id === null && !s.chat.settings.modelId && conversations[0]
               ? { ...s.chat, settings: { ...s.chat.settings, modelId: conversations[0].modelId } }
               : s.chat,
         }));
       } catch (e) {
-        set({ historyError: toAppError(e) });
+        set({ historyError: toAppError(e), conversationsStatus: "error" });
       }
     },
 
@@ -482,16 +584,7 @@ export const useStore = create<Store>()((set, get) => {
     newChat() {
       flushSettings();
       const s = get();
-      const model = activeModel(s);
-      set({
-        sendError: null,
-        chat: draftChat({
-          modelId: model?.id ?? s.chat.settings.modelId,
-          systemPrompt: "",
-          // Thinking on/off carries over; it's a preference more than a per-chat setting.
-          params: { ...defaultParams(), reasoning: s.chat.settings.params.reasoning },
-        }),
-      });
+      set({ sendError: null, chat: draftChat(newChatSettings(s)) });
     },
 
     async openChat(id) {
@@ -561,12 +654,7 @@ export const useStore = create<Store>()((set, get) => {
         get().showToast({ tone: "error", text: "Couldn't delete the chat.", details: toAppError(e).message });
         return false;
       }
-      if (get().chat.id === id) get().newChat();
-      set((s) => ({
-        conversations: s.conversations.filter((c) => c.id !== id),
-        results: s.results && s.results.filter((c) => c.id !== id),
-        live: Object.fromEntries(Object.entries(s.live).filter(([, m]) => m.conversationId !== id)),
-      }));
+      forgetChats([id]);
       return true;
     },
 
@@ -582,6 +670,65 @@ export const useStore = create<Store>()((set, get) => {
       } catch (e) {
         get().showToast({ tone: "error", text: "Couldn't export the chat.", details: toAppError(e).message });
       }
+    },
+
+    setSettingsOpen(open) {
+      set({ settingsOpen: open });
+      if (!open) void flushAppSettings();
+    },
+
+    updateAppSettings(patch) {
+      set((s) => {
+        const settings = { ...s.settings, ...patch };
+        // An empty new chat follows changed defaults, unless its own settings were changed.
+        const chat = isUntouchedDraft(s) ? { ...s.chat, settings: newChatSettings({ ...s, settings }) } : s.chat;
+        return { settings, chat };
+      });
+      for (const k of Object.keys(patch) as (keyof AppSettings)[]) dirtySettings.add(k);
+      clearTimeout(appSettingsTimer);
+      // Typing and sliders are saved once they pause; a single choice is saved right away.
+      const continuous = "systemPrompt" in patch || "params" in patch;
+      appSettingsTimer = setTimeout(() => void flushAppSettings(), continuous ? 400 : 0);
+    },
+
+    async setRetention(days) {
+      if (!(await flushAppSettings())) return null;
+      try {
+        const settings = await settingsUpdate({ retentionDays: days });
+        set({ settings: { ...get().settings, retentionDays: settings.retentionDays } });
+        if (days === null) return 0;
+        // The user asked for this, so the open chat isn't spared.
+        const deleted = await historyPrune([]);
+        forgetChats(deleted);
+        return deleted.length;
+      } catch (e) {
+        get().showToast({ tone: "error", text: "Couldn't change how long chats are kept.", details: toAppError(e).message });
+        return null;
+      }
+    },
+
+    async pruneHistory() {
+      const { settings, chat } = get();
+      if (settings.retentionDays === null) return;
+      try {
+        forgetChats(await historyPrune(chat.id ? [chat.id] : []));
+      } catch (e) {
+        console.error("auto-delete failed", e);
+      }
+    },
+
+    async deleteAllHistory() {
+      try {
+        await historyDeleteAll();
+      } catch (e) {
+        get().showToast({ tone: "error", text: "Couldn't delete chat history.", details: toAppError(e).message });
+        void get().loadConversations();
+        return false;
+      }
+      forgetChats(get().conversations.map((c) => c.id));
+      if (get().chat.id !== null) get().newChat();
+      set({ conversations: [], results: null, search: "", live: {} });
+      return true;
     },
 
     selectModel: (modelId) => get().updateSettings({ modelId }),

@@ -3,6 +3,9 @@ import ReactDOM from "react-dom/client";
 import "@fontsource-variable/literata";
 import "./styles.css";
 import App from "./App";
+import { applySavedTheme } from "./theme";
+
+applySavedTheme();
 
 async function start() {
   // `npm run dev` in a plain browser: fake the Rust backend so the UI can be worked on without Tauri.

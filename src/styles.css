@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* River-slate palette. Light is the base; dark follows the OS setting (a theme switch comes in Phase 3). */
+/* River-slate palette. Light is the base. */
 :root {
   --ground: #eef2f1;
   --surface: #f8faf9;
@@ -22,8 +22,10 @@
   color-scheme: light;
 }
 
+/* Dark: follows the OS unless a theme is chosen in Settings (data-theme on <html>).
+   The two blocks must stay identical. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --ground: #0f1a1c;
     --surface: #152326;
     --ink: #dae4e2;
@@ -43,6 +45,27 @@
     --syn-title: #c6a6d8;
     color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --ground: #0f1a1c;
+  --surface: #152326;
+  --ink: #dae4e2;
+  --ink-2: #a3b3b1;
+  --ink-3: #71817f;
+  --line: #26383b;
+  --river: #86bdb9;
+  --river-soft: #1b3235;
+  --sediment: #1f211c;
+  --brick: #e38c79;
+  --brick-soft: #38201b;
+  --amber: #d9b36a;
+  --amber-soft: #2f2819;
+  --code-bg: #0a1315;
+  --syn-string: #a9c47f;
+  --syn-number: #dba862;
+  --syn-title: #c6a6d8;
+  color-scheme: dark;
 }
 
 @theme inline {

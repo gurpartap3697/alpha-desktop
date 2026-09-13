@@ -1,13 +1,17 @@
-//! Commands for the conversation list: open, search, rename, delete, titles, export.
+//! Commands for the conversation list (open, search, rename, delete, titles, export) and for
+//! history as a whole (auto-delete, delete all).
 
 use std::path::PathBuf;
 
+use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
-use crate::db::{Conversation, ConversationSummary, Params};
+use crate::db::{now_ms, Conversation, ConversationSummary, Params};
 use crate::error::{AppError, ErrorKind};
-use crate::state::AppState;
+use crate::settings::AppSettings;
+use crate::state::{AppState, HISTORY_FILE};
 use crate::titles;
 
 #[tauri::command]
@@ -64,6 +68,64 @@ pub async fn conversation_generate_title(state: State<'_, AppState>, id: String)
         Err(_) => None,
     };
     db.resolve_title(&id, generated.as_deref())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryInfo {
+    /// The database file, for "what's stored where".
+    pub path: String,
+    pub conversations: u64,
+    /// With `inactive_days`: how many chats have had no activity for that long.
+    pub inactive: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn history_info(state: State<'_, AppState>, inactive_days: Option<u32>) -> Result<HistoryInfo, AppError> {
+    let db = state.db()?;
+    Ok(HistoryInfo {
+        path: state.data_dir.join(HISTORY_FILE).display().to_string(),
+        conversations: db.count()?,
+        inactive: inactive_days.map(|d| db.count_inactive(retention_cutoff(d))).transpose()?,
+    })
+}
+
+/// Apply the auto-delete setting. Chats in `keep` (the one on screen) and chats still answering are
+/// left alone. Returns the ids deleted.
+#[tauri::command]
+pub async fn history_prune(state: State<'_, AppState>, keep: Vec<String>) -> Result<Vec<String>, AppError> {
+    prune(&state, keep)
+}
+
+pub fn prune(state: &AppState, mut keep: Vec<String>) -> Result<Vec<String>, AppError> {
+    let db = state.db()?;
+    let Some(days) = AppSettings::load(db)?.retention_days else { return Ok(Vec::new()) };
+    keep.extend(state.streams.lock().unwrap().values().filter_map(|s| s.conversation_id.clone()));
+    let deleted = db.delete_inactive(retention_cutoff(days), &keep)?;
+    if !deleted.is_empty() {
+        eprintln!("history: auto-deleted {} chat(s) inactive for {days} days", deleted.len());
+    }
+    Ok(deleted)
+}
+
+fn retention_cutoff(days: u32) -> i64 {
+    now_ms() - i64::from(days) * 86_400_000
+}
+
+#[tauri::command]
+pub async fn history_delete_all(state: State<'_, AppState>) -> Result<u64, AppError> {
+    for s in state.streams.lock().unwrap().values() {
+        s.token.cancel();
+    }
+    state.db()?.delete_all()
+}
+
+/// Show the history file in the system file manager.
+#[tauri::command]
+pub async fn history_reveal(app: AppHandle, state: State<'_, AppState>) -> Result<(), AppError> {
+    let path = state.data_dir.join(HISTORY_FILE);
+    app.opener().reveal_item_in_dir(&path)
+        .map_err(|e| AppError::new(ErrorKind::Storage, format!("Couldn't show {}: {e}", path.display())))
 }
 
 /// Ask where to save, then write the Markdown there. `None` if the user cancelled.

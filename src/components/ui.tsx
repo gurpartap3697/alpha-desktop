@@ -1,12 +1,14 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { useEffect, useState, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from "react";
 import { X } from "lucide-react";
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
 
-type Variant = "primary" | "outline" | "quiet";
+type Variant = "primary" | "outline" | "quiet" | "danger" | "danger-outline";
 
 const variants: Record<Variant, string> = {
   primary: "bg-river text-ground hover:brightness-110 disabled:brightness-100",
+  danger: "bg-brick text-ground hover:brightness-110 disabled:brightness-100",
+  "danger-outline": "border border-brick/50 text-brick hover:bg-brick-soft",
   outline: "border border-line text-ink hover:bg-river-soft",
   quiet: "text-ink-2 hover:bg-river-soft hover:text-ink",
 };
@@ -95,6 +97,36 @@ export function Notice({
         </IconButton>
       )}
     </div>
+  );
+}
+
+/** Render children only after a short wait, so fast loads don't flash a loading state. */
+export function Delayed({ ms = 250, children }: { ms?: number; children: ReactNode }) {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setShown(true), ms);
+    return () => clearTimeout(t);
+  }, [ms]);
+  return shown ? <>{children}</> : null;
+}
+
+/** A placeholder bar for content that is loading. */
+export function Skeleton({ className, style }: { className?: string; style?: CSSProperties }) {
+  return <div aria-hidden style={style} className={cx("animate-pulse rounded-[5px] bg-line/70", className)} />;
+}
+
+export function Kbd({ keys }: { keys: string[] }) {
+  return (
+    <span className="inline-flex gap-1">
+      {keys.map((k) => (
+        <kbd
+          key={k}
+          className="inline-flex h-5 min-w-5 items-center justify-center rounded-[4px] border border-line bg-ground px-1 font-sans text-[11px] text-ink-2"
+        >
+          {k}
+        </kbd>
+      ))}
+    </span>
   );
 }
 

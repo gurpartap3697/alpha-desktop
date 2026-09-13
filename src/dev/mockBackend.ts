@@ -2,13 +2,15 @@
 // Not included in production builds (see main.tsx).
 //
 // Start states via the URL: ?scenario=no_key | rejected | unreachable | update | announcement | file_storage
-//   | history_broken | fresh (empty history)
+//   | history_broken | fresh (empty history, default settings)
 // Message commands, like gateway/mock/mock_vllm.py: /error 429|401|404|500|context, /drop, /slow
 // History lives in localStorage, so a reload behaves like restarting the app (including interrupted answers).
 
 import { mockIPC } from "@tauri-apps/api/mocks";
+import { defaultAppSettings } from "../api";
 import type {
   AppError,
+  AppSettings,
   AuthStatus,
   ConfigStatus,
   Conversation,
@@ -84,12 +86,14 @@ let history: Record<string, Stored> = {};
 
 function loadHistory() {
   if (scenario === "fresh") localStorage.removeItem(HISTORY_KEY);
+  const saved = localStorage.getItem(HISTORY_KEY);
   try {
-    history = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "{}");
+    history = JSON.parse(saved ?? "{}");
   } catch {
     history = {};
   }
-  if (!Object.keys(history).length && scenario !== "fresh") seedHistory();
+  // Seeded on first run only, so deleting everything sticks.
+  if (saved === null && scenario !== "fresh") seedHistory();
   // Like startup recovery: answers still streaming when the page closed were interrupted.
   for (const c of Object.values(history))
     for (const m of c.messages)
@@ -219,6 +223,45 @@ function prepare(req: TurnRequest): { conversation: Stored; changed: Message[]; 
   return { conversation: c, changed, history: sent };
 }
 
+// ---- Settings and history as a whole (src-tauri/src/settings.rs, history.rs) ----
+
+const SETTINGS_KEY = "alph-mock-settings";
+const DAY = 86_400_000;
+
+function loadSettings(): AppSettings {
+  try {
+    return { ...defaultAppSettings(), ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "{}") };
+  } catch {
+    return defaultAppSettings();
+  }
+}
+
+function updateSettings(patch: Partial<AppSettings>): AppSettings {
+  const next = { ...loadSettings(), ...patch };
+  const t = next.params.temperature;
+  if (!["system", "light", "dark"].includes(next.theme)) fail("bad_request", "Invalid setting: unknown theme");
+  if (t !== null && !(t >= 0 && t <= 2)) fail("bad_request", "Temperature must be between 0 and 2");
+  if (next.params.maxTokens !== null && !(next.params.maxTokens > 0)) fail("bad_request", "Maximum answer length must be a positive number of tokens");
+  if (next.retentionDays !== null && !(Number.isInteger(next.retentionDays) && next.retentionDays >= 1 && next.retentionDays <= 3650))
+    fail("bad_request", "Chats can be kept for 1 to 3650 days");
+  next.defaultModel = next.defaultModel?.trim() || null;
+  next.systemPrompt = next.systemPrompt?.trim() ? next.systemPrompt : null;
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  return next;
+}
+
+const inactive = (days: number) => Object.values(history).filter((c) => c.updatedAt < Date.now() - days * DAY);
+
+function prune(keep: string[]): string[] {
+  const days = loadSettings().retentionDays;
+  if (days === null) return [];
+  const answering = [...streams.values()].map((s) => s.conversationId);
+  const ids = inactive(days).map((c) => c.id).filter((id) => !keep.includes(id) && !answering.includes(id));
+  for (const id of ids) delete history[id];
+  saveHistory();
+  return ids;
+}
+
 // ---- Streaming ----
 
 async function chat(requestId: string, req: TurnRequest, emit: (ev: StreamEvent) => void) {
@@ -312,7 +355,9 @@ async function generateTitle(id: string): Promise<ConversationSummary> {
 }
 
 export function install() {
+  if (scenario === "fresh") localStorage.removeItem(SETTINGS_KEY);
   loadHistory();
+  prune([]);
   mockIPC(async (cmd, args) => {
     const a = (args ?? {}) as Record<string, unknown>;
     switch (cmd) {
@@ -397,6 +442,36 @@ export function install() {
         (window as unknown as { __lastExport?: string }).__lastExport = String(a.content);
         return path;
       }
+      case "settings_get":
+        await sleep(30);
+        if (scenario === "history_broken") fail("database", "unable to open database file: disk I/O error");
+        return loadSettings();
+      case "settings_update":
+        await sleep(30);
+        if (scenario === "history_broken") fail("database", "unable to open database file: disk I/O error");
+        return updateSettings(a.patch as Partial<AppSettings>);
+      case "history_info":
+        await sleep(60);
+        if (scenario === "history_broken") fail("database", "unable to open database file: disk I/O error");
+        return {
+          path: "/Users/you/Library/Application Support/com.alph.desktop/history.sqlite3",
+          conversations: Object.keys(history).length,
+          inactive: a.inactiveDays == null ? null : inactive(Number(a.inactiveDays)).length,
+        };
+      case "history_prune":
+        return prune(a.keep as string[]);
+      case "history_delete_all":
+        await sleep(300);
+        for (const s of streams.values()) s.cancelled = true;
+        {
+          const n = Object.keys(history).length;
+          history = {};
+          saveHistory();
+          return n;
+        }
+      case "history_reveal":
+        console.info("[mock] history_reveal");
+        return null;
       case "plugin:opener|open_url":
         window.open(String(a.url), "_blank", "noopener");
         return null;

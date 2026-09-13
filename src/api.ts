@@ -176,6 +176,44 @@ export const conversationGenerateTitle = (id: string) =>
 export const saveMarkdown = (suggestedName: string, content: string) =>
   invoke<string | null>("save_markdown", { suggestedName, content });
 
+export interface HistoryInfo {
+  path: string;
+  conversations: number;
+  /** With `inactiveDays`: chats with no activity for that long. */
+  inactive: number | null;
+}
+
+export const historyInfo = (inactiveDays?: number | null) =>
+  invoke<HistoryInfo>("history_info", { inactiveDays: inactiveDays ?? null });
+/** Applies the auto-delete setting, sparing `keep`. Resolves to the deleted ids. */
+export const historyPrune = (keep: string[]) => invoke<string[]>("history_prune", { keep });
+export const historyDeleteAll = () => invoke<number>("history_delete_all");
+export const historyReveal = () => invoke<void>("history_reveal");
+
+// src-tauri/src/settings.rs
+export type Theme = "system" | "light" | "dark";
+
+export interface AppSettings {
+  theme: Theme;
+  /** `null`: new chats continue with the most recently used model. */
+  defaultModel: string | null;
+  systemPrompt: string | null;
+  params: Params;
+  /** `null`: chats are kept until deleted. */
+  retentionDays: number | null;
+}
+
+export const defaultAppSettings = (): AppSettings => ({
+  theme: "system",
+  defaultModel: null,
+  systemPrompt: null,
+  params: { temperature: null, maxTokens: null, reasoning: null },
+  retentionDays: null,
+});
+
+export const settingsGet = () => invoke<AppSettings>("settings_get");
+export const settingsUpdate = (patch: Partial<AppSettings>) => invoke<AppSettings>("settings_update", { patch });
+
 export function isAppError(e: unknown): e is AppError {
   return typeof e === "object" && e !== null && "kind" in e && "message" in e;
 }

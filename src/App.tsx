@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { useStore } from "./store";
+import { chatBusy, useStore } from "./store";
 import { errorTitle } from "./errors";
+import { applyTheme } from "./theme";
+import { useShortcuts } from "./shortcuts";
 import { KeyScreen } from "./components/KeyScreen";
 import { UpdateScreen } from "./components/UpdateScreen";
 import { TopBar } from "./components/TopBar";
 import { Transcript } from "./components/Transcript";
 import { Composer } from "./components/Composer";
 import { Sidebar } from "./components/Sidebar";
-import { Button, IconButton, Notice, cx } from "./components/ui";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { Button, Delayed, IconButton, Notice, cx } from "./components/ui";
 
 const SIDEBAR_KEY = "alph.sidebarOpen";
+const PRUNE_EVERY_MS = 60 * 60 * 1000;
 
 function useSidebar() {
   const [open, setOpen] = useState(() => {
@@ -39,6 +43,41 @@ export default function App() {
   const boot = useStore((s) => s.boot);
   const started = useRef(false);
   const [sidebarOpen, setSidebarOpen] = useSidebar();
+  const theme = useStore((s) => (s.settingsLoaded ? s.settings.theme : null));
+  const retentionDays = useStore((s) => s.settings.retentionDays);
+
+  useEffect(() => {
+    if (theme) applyTheme(theme);
+  }, [theme]);
+
+  // Startup auto-delete happens in the Rust core; this covers an app left open for days.
+  useEffect(() => {
+    if (phase !== "ready" || retentionDays === null) return;
+    const t = setInterval(() => void useStore.getState().pruneHistory(), PRUNE_EVERY_MS);
+    return () => clearInterval(t);
+  }, [phase, retentionDays]);
+
+  useShortcuts(
+    {
+      newChat: () => {
+        const s = useStore.getState();
+        if (s.chat.id !== null || s.chat.messages.length) s.newChat();
+        focusById("composer");
+      },
+      focusComposer: () => focusById("composer"),
+      searchChats: () => {
+        setSidebarOpen(true);
+        // The sidebar may only now be rendering.
+        requestAnimationFrame(() => focusById("chat-search", true));
+      },
+      settings: () => useStore.getState().setSettingsOpen(true),
+      stop: () => {
+        const s = useStore.getState();
+        if (chatBusy(s)) s.stop();
+      },
+    },
+    phase === "ready",
+  );
 
   useEffect(() => {
     if (started.current) return;
@@ -72,7 +111,13 @@ export default function App() {
 
   switch (phase) {
     case "loading":
-      return null;
+      return (
+        <Delayed ms={400}>
+          <main className="flex h-full" aria-busy="true" aria-label="Starting Alph">
+            <p className="m-auto animate-pulse font-serif text-[2rem] font-[560] tracking-[-0.02em] text-ink-3">Alph</p>
+          </main>
+        </Delayed>
+      );
     case "update_required":
       return <UpdateScreen />;
     case "signed_out":
@@ -86,10 +131,17 @@ export default function App() {
             <Transcript />
             <Composer />
           </div>
+          <SettingsDialog />
           <ToastView />
         </div>
       );
   }
+}
+
+function focusById(id: string, select = false) {
+  const el = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
+  el?.focus();
+  if (select) el?.select();
 }
 
 function ToastView() {

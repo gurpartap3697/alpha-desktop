@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "re
 import { ArrowUp, Lightbulb, LightbulbOff, Square } from "lucide-react";
 import { activeModel, chatBusy, reasoningOn, useStore } from "../store";
 import { errorTitle } from "../errors";
+import { ariaShortcut, withShortcut } from "../shortcuts";
 import { Notice, cx } from "./ui";
 
 export function Composer() {
@@ -61,6 +62,7 @@ export function Composer() {
         <textarea
           id="composer"
           ref={input}
+          aria-keyshortcuts={ariaShortcut("focusComposer")}
           rows={1}
           value={text}
           autoFocus
@@ -100,7 +102,8 @@ export function Composer() {
               type="button"
               onClick={stop}
               aria-label="Stop"
-              title="Stop"
+              title={withShortcut("Stop", "stop")}
+              aria-keyshortcuts={ariaShortcut("stop")}
               className="inline-flex size-8 items-center justify-center rounded-full bg-ink text-ground hover:opacity-85"
             >
               <Square size={12} fill="currentColor" />

@@ -5,7 +5,8 @@ import { Download, Ellipsis, PanelLeftClose, Pencil, Search, SquarePen, Trash2, 
 import type { ConversationSummary } from "../api";
 import { useStore } from "../store";
 import { errorTitle } from "../errors";
-import { Button, IconButton, Notice, cx } from "./ui";
+import { ariaShortcut, withShortcut } from "../shortcuts";
+import { Button, Delayed, IconButton, Notice, Skeleton, cx } from "./ui";
 
 export function Sidebar({ onHide }: { onHide: () => void }) {
   const newChat = useStore((s) => s.newChat);
@@ -14,6 +15,7 @@ export function Sidebar({ onHide }: { onHide: () => void }) {
   const results = useStore((s) => s.results);
   const search = useStore((s) => s.search);
   const historyError = useStore((s) => s.historyError);
+  const loading = useStore((s) => s.conversationsStatus === "loading");
   const loadConversations = useStore((s) => s.loadConversations);
 
   return (
@@ -23,7 +25,7 @@ export function Sidebar({ onHide }: { onHide: () => void }) {
           <PanelLeftClose size={16} />
         </IconButton>
         <div className="flex-1" />
-        <Button variant="quiet" onClick={newChat} disabled={draftOpen} className="px-2.5">
+        <Button variant="quiet" onClick={newChat} disabled={draftOpen} className="px-2.5" title={withShortcut("New chat", "newChat")}>
           <SquarePen size={15} />
           New chat
         </Button>
@@ -41,7 +43,11 @@ export function Sidebar({ onHide }: { onHide: () => void }) {
             actions={<Button onClick={() => void loadConversations()}>Try again</Button>}
           />
         )}
-        {results ? (
+        {loading && !historyError ? (
+          <Delayed>
+            <ListSkeleton />
+          </Delayed>
+        ) : results ? (
           results.length ? (
             <ul>{results.map((c) => <ChatRow key={c.id} chat={c} query={search.trim()} />)}</ul>
           ) : (
@@ -54,6 +60,17 @@ export function Sidebar({ onHide }: { onHide: () => void }) {
         )}
       </nav>
     </aside>
+  );
+}
+
+function ListSkeleton() {
+  return (
+    <div role="status" className="space-y-3 px-2.5 pt-2" aria-busy="true" aria-label="Loading chats">
+      <Skeleton className="h-2.5 w-14" />
+      {[80, 62, 72, 54, 68].map((w) => (
+        <Skeleton key={w} className="h-3.5" style={{ width: `${w}%` }} />
+      ))}
+    </div>
   );
 }
 
@@ -74,6 +91,8 @@ function SearchBox() {
           onChange={(e) => setSearch(e.target.value)}
           onKeyDown={(e) => e.key === "Escape" && setSearch("")}
           placeholder="Search chats"
+          title={withShortcut("Search chats", "searchChats")}
+          aria-keyshortcuts={ariaShortcut("searchChats")}
           autoComplete="off"
           spellCheck={false}
           className="min-w-0 flex-1 bg-transparent text-[13px] placeholder:text-ink-3 focus:outline-none"
@@ -283,7 +302,7 @@ function ConfirmDelete({
               <Button>Cancel</Button>
             </AlertDialog.Cancel>
             <AlertDialog.Action asChild>
-              <Button className="border-0 bg-brick text-ground hover:bg-brick hover:brightness-110" onClick={() => void deleteChat(chat.id)}>
+              <Button variant="danger" onClick={() => void deleteChat(chat.id)}>
                 Delete
               </Button>
             </AlertDialog.Action>

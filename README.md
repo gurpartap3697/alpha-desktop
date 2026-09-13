@@ -41,25 +41,47 @@ The mock also serves `gateway/public/app/config.json` at `/app/config.json`, as 
 npm run dev   # open http://localhost:1420
 ```
 
-Outside Tauri, a fake backend (`src/dev/mockBackend.ts`, dev builds only) stands in for the Rust commands. Start states: `?scenario=no_key`, `rejected`, `unreachable`, `update`, `announcement`, `file_storage`, `history_broken`, and `fresh` (empty history). The key `bad` is rejected. The messages `/error 429|401|404|500|context`, `/drop`, `/slow` and `/unreachable` trigger the matching states.
+Outside Tauri, a fake backend (`src/dev/mockBackend.ts`, dev builds only) stands in for the Rust commands. Start states: `?scenario=no_key`, `rejected`, `unreachable`, `update`, `announcement`, `file_storage`, `history_broken`, and `fresh` (empty history, default settings). The key `bad` is rejected. The messages `/error 429|401|404|500|context`, `/drop`, `/slow` and `/unreachable` trigger the matching states.
 
-The fake keeps chat history in the browser's `localStorage` with a few sample chats, so reloading the page behaves like restarting the app. Reloading while an answer streams shows the "closed before the answer finished" state.
+The fake keeps chat history and settings in the browser's `localStorage` with a few sample chats (one of them 45 days old, to try auto-delete), so reloading the page behaves like restarting the app. Reloading while an answer streams shows the "closed before the answer finished" state.
 
 ### Where things are stored
 
 - API key: macOS Keychain, Windows Credential Manager or Linux Secret Service (service `com.alph.desktop`). If none is available it goes to a `0600` file `gateway-key` in the app data directory, and the app says so. Unsigned dev builds on macOS may ask for Keychain access after each rebuild.
 - Last good app config: `app-config.json` in the app data directory.
-- Chat history: `history.sqlite3` in the app data directory (macOS `~/Library/Application Support/com.alph.desktop`, Windows `%APPDATA%\com.alph.desktop`, Linux `~/.local/share/com.alph.desktop`). Only the Rust core opens it. The webview gets typed commands, not SQL. Answers are written as they stream (about every 0.75 s). Any answer still marked as streaming at startup was cut off by the app closing and is marked as such. Schema migrations are in `src-tauri/src/db.rs`, and the version is tracked with `PRAGMA user_version`. An older app refuses to open history written by a newer one.
+- Chat history: `history.sqlite3` in the app data directory (macOS `~/Library/Application Support/com.alph.desktop`, Windows `%APPDATA%\com.alph.desktop`, Linux `~/.local/share/com.alph.desktop`). Only the Rust core opens it. The webview gets typed commands, not SQL. Answers are written as they stream (about every 0.75 s). Any answer still marked as streaming at startup was cut off by the app closing and is marked as such. Schema migrations are in `src-tauri/src/db.rs`, and the version is tracked with `PRAGMA user_version`. An older app refuses to open history written by a newer one. Deleted chats are overwritten on disk (`secure_delete`), and "Delete all chats" also compacts the file and its WAL.
+- Settings (theme, defaults for new chats, auto-delete): the `settings` table of the same database, one row per setting. The theme is also copied to the webview's `localStorage` so the window starts in the right colors. Auto-delete runs when the app starts and hourly while it's open. It goes by each chat's last message, and never deletes a chat that is answering.
 
 ## Test
 
 ```sh
 cd src-tauri
-cargo test                                                                # unit tests
+cargo test                                                                # unit tests (SSE parser, trimming, history, settings, …)
 ALPH_TEST_GATEWAY=http://127.0.0.1:8000 ALPH_TEST_MOCK=1 cargo test       # + live tests against the mock
 ALPH_TEST_GATEWAY=http://127.0.0.1:8000 ALPH_TEST_MODEL=Qwen/Qwen3-1.7B \
   cargo test live_ -- --nocapture --test-threads=1                        # live tests against a real model
 ```
+
+UI flows (key screen, chat, sidebar, settings, shortcuts) run in Playwright against the dev server with the fake backend:
+
+```sh
+npx playwright install chromium   # once
+npm run test:e2e                  # starts Vite on port 1430, so it can run next to `tauri dev`
+```
+
+These exercise the React app and its state, not the Rust core or the native webviews. The Rust side is covered by `cargo test`, and the OS-specific parts by the checklists below.
+
+## Keyboard shortcuts
+
+| | macOS | Windows / Linux |
+|---|---|---|
+| New chat | ⌘N | Ctrl+N |
+| Go to the message box | ⌘L | Ctrl+L |
+| Search chats | ⌘K | Ctrl+K |
+| Settings | ⌘, | Ctrl+, |
+| Stop the answer | Esc | Esc |
+
+Esc only stops the answer when it isn't closing something else (a menu, a dialog, an edit, a search).
 
 ## Build
 
@@ -74,6 +96,18 @@ CI (`.github/workflows/build.yml`) builds unsigned bundles on native runners:
 - Linux: AppImage, `.deb` and `.rpm`
 
 Set the repository variable `ALPH_GATEWAY_URL` so CI builds point at the real gateway.
+
+## Phase 3 checklist
+
+Run on each OS:
+
+- [ ] Settings → Appearance: Light and Dark apply at once, including the window's title bar; after a restart the window opens in that theme without a flash; Match system follows an OS theme change
+- [ ] Settings → New chats: a default model, thinking, temperature, answer length and system prompt apply to the next new chat (and the empty one on screen), not to existing chats
+- [ ] Settings → History: the path is right and "Show in Finder / Explorer / folder" opens it; choosing an auto-delete period that covers old chats asks first and says how many; after restarting, chats past the period are gone
+- [ ] Delete all chats (with confirmation) empties the sidebar, stops an answer in progress, and stays empty after a restart
+- [ ] Shortcuts from the table above work, including while typing in the message box; Esc in a menu or the rename box doesn't stop an answer
+- [ ] Loading: starting with a slow gateway shows placeholders rather than blank panels
+- [ ] Settings → Account shows the server and where the key is kept; signing out returns to the key screen and chats are still there after entering a key
 
 ## Phase 2 checklist
 

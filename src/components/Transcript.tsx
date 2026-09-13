@@ -6,7 +6,7 @@ import { errorTitle } from "../errors";
 import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
 import { Banners } from "./Banners";
-import { Button, IconButton, Notice } from "./ui";
+import { Button, Delayed, IconButton, Notice, Skeleton } from "./ui";
 
 export function Transcript() {
   const messages = useStore((s) => s.chat.messages);
@@ -48,7 +48,11 @@ export function Transcript() {
               details={loadError.message}
               actions={loadError.kind !== "not_found" && chatId && <Button onClick={() => void openChat(chatId)}>Try again</Button>}
             />
-          ) : status === "loading" ? null : count === 0 ? (
+          ) : status === "loading" ? (
+            <Delayed>
+              <TranscriptSkeleton />
+            </Delayed>
+          ) : count === 0 ? (
             <EmptyState />
           ) : (
             turns.map((t, i) => (
@@ -71,16 +75,49 @@ export function Transcript() {
   );
 }
 
+function TranscriptSkeleton() {
+  return (
+    <div role="status" className="mt-4 space-y-4" aria-busy="true" aria-label="Loading chat">
+      <Skeleton className="h-4 w-2/5" />
+      <Skeleton className="mt-8 h-4 w-full" />
+      <Skeleton className="h-4 w-11/12" />
+      <Skeleton className="h-4 w-3/5" />
+    </div>
+  );
+}
+
 function EmptyState() {
   const model = useStore(activeModel);
-  if (!model) return null;
+  const modelsLoading = useStore((s) => s.modelsStatus === "loading" || s.modelsStatus === "idle");
+  const retentionDays = useStore((s) => s.settings.retentionDays);
+  const openSettings = useStore((s) => s.setSettingsOpen);
+
+  if (!model) {
+    // Without models there's nothing to start; the banner above explains why.
+    return modelsLoading ? (
+      <Delayed>
+        <div role="status" className="pt-[18vh]" aria-busy="true" aria-label="Loading models">
+          <Skeleton className="h-8 w-40" />
+          <Skeleton className="mt-4 h-4 w-80 max-w-full" />
+        </div>
+      </Delayed>
+    ) : null;
+  }
   return (
     <div className="pt-[18vh]">
       <h2 className="font-serif text-[1.9rem] leading-tight font-[520] tracking-[-0.01em]">{model.displayName}</h2>
       <p className="mt-2 max-w-[34rem] text-[15px] leading-6 text-ink-2">
         {model.description ?? "Ask a question, paste some text to work on, or describe a problem."}
       </p>
-      <p className="mt-5 text-[13px] text-ink-3">Chats are saved on this device only.</p>
+      <p className="mt-5 text-[13px] leading-5 text-ink-3">
+        Chats are saved on this device only
+        {retentionDays === null
+          ? "."
+          : `, and deleted after ${retentionDays === 1 ? "a day" : `${retentionDays} days`} without new messages.`}{" "}
+        <button type="button" onClick={() => openSettings(true)} className="underline underline-offset-2 hover:text-ink-2">
+          Settings
+        </button>
+      </p>
     </div>
   );
 }
