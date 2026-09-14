@@ -142,6 +142,8 @@ def stage(args):
 
     files = sorted(p for p in src.iterdir() if p.is_file() and not p.name.startswith("."))
     names = {p.name for p in files}
+    if "DRY-RUN" in names:
+        fail(f"{src} is a release dry run (ALPHA_RELEASE_DRY_RUN): test credentials, not notarized. Don't publish it.")
     print(f"Checking {src}")
     check_sums(src)
 

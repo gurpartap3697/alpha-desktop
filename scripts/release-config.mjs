@@ -12,7 +12,8 @@ import { writeFileSync } from "node:fs";
 
 const env = process.env;
 const out = process.argv[2];
-const pubkey = env.ALPHA_UPDATER_PUBKEY?.trim();
+// Base64, so any whitespace (such as a line break pasted into the variable) is safe to drop.
+const pubkey = env.ALPHA_UPDATER_PUBKEY?.replace(/\s+/g, "");
 if (!out || !pubkey) {
   console.error("usage: ALPHA_UPDATER_PUBKEY=<public key> release-config.mjs <output.json>");
   process.exit(2);

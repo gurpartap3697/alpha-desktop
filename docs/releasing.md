@@ -33,6 +33,7 @@ All settings are GitHub repository **secrets** (encrypted) or **variables** (Set
 | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` | secrets | Azure Trusted Signing service principal |
 | `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` | variables | e.g. `https://eus.codesigning.azure.net`, account name, certificate profile name |
 | `ALPHA_ALLOW_UNSIGNED_WINDOWS` | variable | `true` to release with unsigned Windows installers (pilot only, when none of the `AZURE_*` values are set) |
+| `ALPHA_RELEASE_DRY_RUN` | variable | `true` to test the workflow with throwaway credentials. See [Dry run](#dry-run). Remove it before a real release. |
 
 ### Updater keypair
 
@@ -53,9 +54,10 @@ Replacing the key needs a transition release: build one version with the **new**
 Without notarization, Gatekeeper refuses to open the app, so the workflow has no unsigned option for macOS.
 
 1. In the org's Apple Developer Program account, an Account Holder or Admin creates a **Developer ID Application** certificate (Certificates, IDs & Profiles → Certificates → +).
-2. Install it in Keychain Access on a Mac. Export it with its private key as `.p12` with a password, then:
+2. Install it in Keychain Access on a Mac. Export it **with its private key** as `.p12` with a password. A `.cer` or `.pem` file won't work. Then:
    ```sh
-   base64 -i DeveloperID.p12 | pbcopy   # paste into APPLE_CERTIFICATE
+   base64 -i DeveloperID.p12 | tr -d '\n' > DeveloperID.p12.base64
+   gh secret set APPLE_CERTIFICATE < DeveloperID.p12.base64   # from the file, so no terminal characters get in
    security find-identity -v -p codesigning   # the quoted name is APPLE_SIGNING_IDENTITY
    ```
 3. Notarization credentials. Prefer an **App Store Connect API key**, since it isn't tied to one person's Apple ID: App Store Connect → Users and Access → Integrations → Team Keys → +, with the *Developer* role. Set `APPLE_API_ISSUER` (issuer ID), `APPLE_API_KEY` (key ID) and `APPLE_API_PRIVATE_KEY` (contents of the downloaded `AuthKey_<id>.p8`, which can only be downloaded once).
@@ -95,7 +97,7 @@ To see which versions are in use, uncomment the access log in `caddy/Caddyfile`.
    ```sh
    git tag v0.2.0 && git push origin v0.2.0
    ```
-3. **Wait for the `release` workflow.** It fails early if the tag and the version disagree or a secret is missing. Each OS then builds, signs and verifies its bundles: `codesign`, `spctl` (must say *Notarized Developer ID*) and `stapler` on macOS, Authenticode on Windows. The last job creates a **draft** release with these files:
+3. **Wait for the `release` workflow.** It fails within a minute if the tag and the version disagree, a secret is missing, the updater key doesn't open with its password or doesn't match `ALPHA_UPDATER_PUBKEY`, or the macOS certificate isn't a usable Apple-issued `.p12`. Each OS then builds, signs and verifies its bundles: `codesign`, `spctl` (must say *Notarized Developer ID*) and `stapler` on macOS, Authenticode on Windows. The last job creates a **draft** release with these files:
    ```
    Alpha_0.2.0_universal.dmg                                        macOS installer
    Alpha_0.2.0_universal.app.tar.gz(.sig)                           macOS update
@@ -131,6 +133,28 @@ The updater only moves forward. Apps never install a lower version.
 
 - **Not promoted yet:** don't promote it. Staged releases aren't offered to anyone.
 - **Promoted:** release a fix as the next patch version, as quickly as possible. To stop apps that haven't downloaded the bad version yet, and to take it off the download page in the meantime, run `./scripts/publish_release.py promote <previous version> --force`. Apps that already installed it stay on it until the fix is out.
+
+## Dry run
+
+To test the release workflow before the Apple and Azure accounts are ready, set the variable `ALPHA_RELEASE_DRY_RUN=true` along with throwaway values:
+
+```sh
+npx tauri signer generate --ci -p "alpha-test" -w /tmp/alpha-test.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY < /tmp/alpha-test.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body "alpha-test"
+gh variable set ALPHA_UPDATER_PUBKEY < /tmp/alpha-test.key.pub
+gh variable set ALPHA_GATEWAY_URL --body "https://example.com"
+gh variable set ALPHA_RELEASE_DRY_RUN --body "true"
+```
+
+In a dry run:
+
+- The notarization secrets aren't required, and they aren't used if they're set. The macOS app isn't notarized, and the `spctl`/`stapler` checks are skipped.
+- macOS signing is optional. Leave `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD` and `APPLE_SIGNING_IDENTITY` unset to build unsigned. To exercise signing too, use a certificate issued by Apple: a free **Apple Development** certificate works (Xcode → Settings → Accounts → Manage Certificates), exported with its private key as `.p12`. Self-signed certificates don't work, because `codesign` refuses untrusted identities.
+- Windows installers are unsigned unless all the `AZURE_*` values are set.
+- The draft release is titled *DRY RUN* and includes a `DRY-RUN` file, and `publish_release.py stage` refuses to publish it.
+
+Test builds trust the throwaway updater key, so they can never update to a real release. Don't give them to users. Afterwards, delete the draft release, delete the test secrets and `ALPHA_RELEASE_DRY_RUN`, set the real values, and push the tag again (`git push origin :refs/tags/vX.Y.Z && git push origin vX.Y.Z`).
 
 ## Testing the updater locally
 

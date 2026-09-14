@@ -3,6 +3,10 @@ name: release
 # Push a tag like v0.2.0 (after `npm run set-version -- 0.2.0` is committed) to build signed installers
 # and updater packages for all 3 OSes and attach them to a draft GitHub release. Publishing them on
 # the gateway is a separate, manual step: gateway/scripts/publish_release.py. See docs/releasing.md.
+#
+# With the repository variable ALPHA_RELEASE_DRY_RUN=true the workflow runs end to end with test
+# credentials: no notarization or notarization checks on macOS, optional macOS and Windows signing,
+# and a draft release marked as a dry run that publish_release.py refuses to stage.
 on:
   push:
     tags: ["v*"]
@@ -20,6 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       sign-windows: ${{ steps.secrets.outputs.sign-windows }}
+      dry-run: ${{ steps.secrets.outputs.dry-run }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +40,7 @@ jobs:
           ALPHA_GATEWAY_URL: ${{ vars.ALPHA_GATEWAY_URL }}
           ALPHA_UPDATER_PUBKEY: ${{ vars.ALPHA_UPDATER_PUBKEY }}
           ALPHA_ALLOW_UNSIGNED_WINDOWS: ${{ vars.ALPHA_ALLOW_UNSIGNED_WINDOWS }}
+          ALPHA_RELEASE_DRY_RUN: ${{ vars.ALPHA_RELEASE_DRY_RUN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -61,20 +67,32 @@ jobs:
             exit 1
           fi
 
+          dry_run=false
+          if [ "$ALPHA_RELEASE_DRY_RUN" = "true" ]; then
+            dry_run=true
+            echo "::warning::Dry run (ALPHA_RELEASE_DRY_RUN=true): no notarization, signing optional. Don't give these builds to users."
+          fi
+          echo "dry-run=$dry_run" >> "$GITHUB_OUTPUT"
+
           # macOS: without notarization Gatekeeper blocks the app, so there is no unsigned option.
-          need APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
-          if [ -z "$APPLE_API_KEY" ]; then
-            need APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          # A dry run signs only if a certificate is set (a self-signed one works) and never notarizes.
+          if [ "$dry_run" = true ]; then
+            if [ -n "$APPLE_CERTIFICATE" ]; then need APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; fi
           else
-            need APPLE_API_ISSUER APPLE_API_PRIVATE_KEY
+            need APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
+            if [ -z "$APPLE_API_KEY" ]; then
+              need APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+            else
+              need APPLE_API_ISSUER APPLE_API_PRIVATE_KEY
+            fi
           fi
 
           azure=(AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT AZURE_SIGNING_PROFILE)
           set_azure=0; for name in "${azure[@]}"; do [ -n "${!name}" ] && set_azure=$((set_azure + 1)); done
           if [ "$set_azure" -eq "${#azure[@]}" ]; then
             echo "sign-windows=true" >> "$GITHUB_OUTPUT"
-          elif [ "$ALPHA_ALLOW_UNSIGNED_WINDOWS" = "true" ] && [ "$set_azure" -eq 0 ]; then
-            echo "::warning::Windows installers will be unsigned (ALPHA_ALLOW_UNSIGNED_WINDOWS=true). SmartScreen will warn users."
+          elif [ "$set_azure" -eq 0 ] && { [ "$ALPHA_ALLOW_UNSIGNED_WINDOWS" = "true" ] || [ "$dry_run" = true ]; }; then
+            echo "::warning::Windows installers will be unsigned (no AZURE_* settings). SmartScreen will warn users."
             echo "sign-windows=false" >> "$GITHUB_OUTPUT"
           else
             need "${azure[@]}"
@@ -86,6 +104,26 @@ jobs:
             exit 1
           fi
 
+      # Catch a wrong password or mismatched key pair now, not after every OS has compiled for 10 minutes.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - name: Updater key opens and matches the public key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          ALPHA_UPDATER_PUBKEY: ${{ vars.ALPHA_UPDATER_PUBKEY }}
+        run: node scripts/check-updater-key.mjs
+      - name: macOS signing certificate is usable
+        env:
+          DRY_RUN: ${{ steps.secrets.outputs.dry-run }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+        run: node scripts/check-apple-certificate.mjs
+
   bundle:
     needs: preflight
     strategy:
@@ -95,13 +133,16 @@ jobs:
           - platform: macos-latest
             args: --target universal-apple-darwin
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundle-dir: src-tauri/target/universal-apple-darwin/release/bundle
           - platform: windows-latest
             args: ""
             rust-targets: ""
+            bundle-dir: src-tauri/target/release/bundle
           # The oldest supported Ubuntu, so the AppImage and packages run on 22.04 and newer.
           - platform: ubuntu-22.04
             args: ""
             rust-targets: ""
+            bundle-dir: src-tauri/target/release/bundle
     runs-on: ${{ matrix.platform }}
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -143,7 +184,7 @@ jobs:
       - name: macOS notarization key
         if: runner.os == 'macOS'
         env:
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ needs.preflight.outputs.dry-run != 'true' && secrets.APPLE_API_PRIVATE_KEY || '' }}
         run: |
           if [ -n "$APPLE_API_PRIVATE_KEY" ]; then
             path="$RUNNER_TEMP/AuthKey.p8"
@@ -158,28 +199,39 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS: the Tauri CLI imports the certificate into a temporary keychain, signs and notarizes.
+          # It skips notarization when no notarization credentials are set, which is how a dry run skips it.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ needs.preflight.outputs.dry-run != 'true' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ needs.preflight.outputs.dry-run != 'true' && secrets.APPLE_API_KEY || '' }}
+          APPLE_ID: ${{ needs.preflight.outputs.dry-run != 'true' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ needs.preflight.outputs.dry-run != 'true' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry-run != 'true' && secrets.APPLE_TEAM_ID || '' }}
           # Windows: read by trusted-signing-cli.
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        run: npm run tauri -- build ${{ matrix.args }} --ci --config "$RUNNER_TEMP/release.conf.json"
+        run: |
+          # Actions passes an unset secret as an empty string, and the Tauri CLI treats an empty
+          # APPLE_CERTIFICATE, APPLE_SIGNING_IDENTITY or APPLE_ID as set. Unset them instead.
+          for name in TAURI_SIGNING_PRIVATE_KEY_PASSWORD APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_API_ISSUER APPLE_API_KEY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID; do
+            [ -n "${!name}" ] || unset "$name"
+          done
+          # The key is base64; a line break pasted into the secret makes the CLI fail to decode it.
+          TAURI_SIGNING_PRIVATE_KEY=$(printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tr -d '[:space:]')
+          export TAURI_SIGNING_PRIVATE_KEY
+          npm run tauri -- build ${{ matrix.args }} --ci --config "$RUNNER_TEMP/release.conf.json"
 
       - name: Collect release files
         shell: bash
         run: |
           shopt -s nullglob
           mkdir release
-          bundle=(src-tauri/target/release/bundle src-tauri/target/*/release/bundle)
-          [ ${#bundle[@]} -eq 1 ] || { echo "::error::expected one bundle folder, found: ${bundle[*]}"; exit 1; }
-          b=${bundle[0]}
+          # A universal macOS build also leaves a target/release/bundle folder, so use the one for this build's target.
+          b="${{ matrix.bundle-dir }}"
+          [ -d "$b" ] || { echo "::error::bundle folder $b not found"; exit 1; }
           copy() { for f in "$@"; do cp "$f" release/; done; }
           case "$RUNNER_OS" in
             macOS)
@@ -198,7 +250,7 @@ jobs:
           done
 
       - name: Verify macOS signature and notarization
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && needs.preflight.outputs.dry-run != 'true'
         run: |
           app=$(ls -d src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app)
           codesign --verify --deep --strict --verbose=2 "$app"
@@ -206,6 +258,13 @@ jobs:
           echo "$assessment"
           grep -q "Notarized Developer ID" <<<"$assessment"
           xcrun stapler validate "$app"
+
+      - name: Verify macOS signature (dry run)
+        if: runner.os == 'macOS' && needs.preflight.outputs.dry-run == 'true' && vars.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          app=$(ls -d src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --verbose=2 "$app" 2>&1 | grep Authority
 
       - name: Verify Windows signatures
         if: runner.os == 'Windows' && needs.preflight.outputs.sign-windows == 'true'
@@ -227,12 +286,17 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
+      DRY_RUN: ${{ needs.preflight.outputs.dry-run }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           path: release
           merge-multiple: true
+      - name: Dry-run marker
+        if: env.DRY_RUN == 'true'
+        # publish_release.py refuses to stage a folder containing this file.
+        run: echo "Test build from a release dry run (ALPHA_RELEASE_DRY_RUN=true). Not notarized; don't publish." > release/DRY-RUN
       - name: Checksums
         working-directory: release
         run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
@@ -240,7 +304,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release/* \
-            --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes \
-            --title "Alpha $VERSION"
-          echo "Draft release created. Publish it on the gateway with gateway/scripts/publish_release.py (docs/releasing.md)." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DRY_RUN" = true ]; then
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --repo "$GITHUB_REPOSITORY" --draft --prerelease --verify-tag \
+              --title "Alpha $VERSION (DRY RUN, don't publish)" \
+              --notes "Built with ALPHA_RELEASE_DRY_RUN=true and test credentials: not notarized, possibly unsigned. Delete this draft before the real release of $GITHUB_REF_NAME."
+            echo "Dry-run draft release created. Delete it before releasing $GITHUB_REF_NAME for real." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes \
+              --title "Alpha $VERSION"
+            echo "Draft release created. Publish it on the gateway with gateway/scripts/publish_release.py (docs/releasing.md)." >> "$GITHUB_STEP_SUMMARY"
+          fi

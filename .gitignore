@@ -27,6 +27,12 @@ dist-ssr
 gateway/public/app/updates/
 gateway/public/app/download/
 
+# Signing certificates and keys exported for CI secrets
+*.p12
+*.p12.base64
+*.p8
+*.key
+
 # Gateway secrets
 gateway/.env
 gateway/caddy/certs/*
