@@ -3,7 +3,7 @@ import { X } from "lucide-react";
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(" ");
 
-type Variant = "primary" | "outline" | "quiet" | "danger" | "danger-outline";
+export type Variant = "primary" | "outline" | "quiet" | "danger" | "danger-outline";
 
 const variants: Record<Variant, string> = {
   primary: "bg-river text-ground hover:brightness-110 disabled:brightness-100",

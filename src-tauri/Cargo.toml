@@ -30,6 +30,8 @@ tauri-plugin-opener = "2"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tauri-plugin-dialog = "2"
 uuid = { version = "1", features = ["v4"] }
+# Pinned to a minor version: `configure_client` (used to disable redirects) may change between minors.
+tauri-plugin-updater = "2.11"
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -27,6 +27,8 @@ pub enum ErrorKind {
     NotFound,
     /// The app was closed while the answer was streaming.
     Interrupted,
+    /// Checking, downloading, verifying or installing an app update failed.
+    Update,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, thiserror::Error)]

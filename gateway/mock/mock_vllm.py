@@ -2,7 +2,9 @@
 """Fake vLLM OpenAI-compatible server for local development (stdlib only).
 
 Endpoints: GET /v1/models, POST /v1/chat/completions (streaming and non-streaming), and
-GET /app/config.json (serves ../public/app/config.json, as Caddy does in the real gateway).
+GET /app/* (static files from ../public/app, as Caddy serves them in the real gateway: config.json,
+and updates/ and download/ once scripts/publish_release.py has published a release). MOCK_PUBLIC_DIR
+serves another folder instead, e.g. one passed to publish_release.py --public-dir.
 
 Behaviour:
   - Models: MOCK_MODELS (comma-separated, default "gemma,qwen,nemotron"). Any requested model is served.
@@ -18,6 +20,7 @@ Usage: python3 mock_vllm.py --port 8000
 """
 import argparse
 import json
+import mimetypes
 import os
 import re
 import time
@@ -28,7 +31,9 @@ MODELS = [m.strip() for m in os.environ.get("MOCK_MODELS", "gemma,qwen,nemotron"
 REASONING_FIELD = os.environ.get("MOCK_REASONING_FIELD", "reasoning")
 API_KEY = os.environ.get("MOCK_API_KEY", "")
 MAX_CHARS = int(os.environ.get("MOCK_MAX_CHARS", "20000"))
-APP_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", "app", "config.json")
+PUBLIC_APP = os.path.realpath(
+    os.environ.get("MOCK_PUBLIC_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", "app")
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -56,18 +61,26 @@ class Handler(BaseHTTPRequestHandler):
         self._error(401, "Unauthorized", "AuthenticationError")
         return False
 
+    def _static(self, rel):
+        path = os.path.realpath(os.path.join(PUBLIC_APP, rel))
+        if os.path.isdir(path):
+            path = os.path.join(path, "index.html")
+        if not path.startswith(PUBLIC_APP + os.sep) or not os.path.isfile(path):
+            return self._error(404, "Not found", "NotFoundError")
+        with open(path, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(path)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path.rstrip("/") == "/health":
             return self._json(200, {})
-        if self.path == "/app/config.json":
-            with open(APP_CONFIG, "rb") as f:
-                body = f.read()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
+        if self.path.startswith("/app/"):
+            return self._static(self.path[len("/app/"):].split("?", 1)[0])
         if self.path.rstrip("/") != "/v1/models":
             return self._error(404, "Not found", "NotFoundError")
         if not self._authorized():

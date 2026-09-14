@@ -15,6 +15,8 @@ import { Button, Delayed, IconButton, Notice, cx } from "./components/ui";
 
 const SIDEBAR_KEY = "alpha.sidebarOpen";
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
+/** Also picks up a raised `minAppVersion` and new announcements while the app stays open. */
+const UPDATE_CHECK_EVERY_MS = 60 * 60 * 1000;
 
 function useSidebar() {
   const [open, setOpen] = useState(() => {
@@ -56,6 +58,16 @@ export default function App() {
     const t = setInterval(() => void useStore.getState().pruneHistory(), PRUNE_EVERY_MS);
     return () => clearInterval(t);
   }, [phase, retentionDays]);
+
+  useEffect(() => {
+    if (phase !== "ready" && phase !== "signed_out") return;
+    const t = setInterval(() => {
+      const s = useStore.getState();
+      void s.refreshConfig();
+      void s.checkForUpdate();
+    }, UPDATE_CHECK_EVERY_MS);
+    return () => clearInterval(t);
+  }, [phase]);
 
   useShortcuts(
     {

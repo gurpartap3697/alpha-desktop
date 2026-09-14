@@ -30,6 +30,10 @@ import {
   settingsGet,
   settingsUpdate,
   toAppError,
+  updateCheck,
+  updateDownload,
+  updateInstall,
+  type UpdateInfo,
 } from "./api";
 import { exportFileName, toMarkdown } from "./export";
 
@@ -57,6 +61,18 @@ export interface OpenChat {
 export interface Turn {
   user: Message;
   answer?: Message;
+}
+
+export interface UpdateState {
+  /**
+   * How far the update got. A failure keeps the last step reached and sets `error`, so trying again
+   * repeats the step that failed: `idle` checks, `available` downloads, `ready` installs.
+   */
+  status: "idle" | "checking" | "disabled" | "up_to_date" | "available" | "downloading" | "ready" | "installing";
+  info: UpdateInfo | null;
+  progress: { downloaded: number; total: number | null } | null;
+  error: AppError | null;
+  checkedAt: number | null;
 }
 
 export interface Toast {
@@ -104,6 +120,8 @@ interface Store {
   /** Latest state of every answer streamed this session, so switching chats doesn't lose live text. */
   live: Record<string, Message>;
 
+  update: UpdateState;
+
   toast: Toast | null;
   dismissed: Record<string, true>;
 
@@ -111,6 +129,14 @@ interface Store {
   submitKey(key: string): Promise<void>;
   signOut(): Promise<void>;
   loadModels(): Promise<void>;
+  /** Reload the app config. Shows the update screen if this version is no longer supported and nothing is answering. */
+  refreshConfig(): Promise<void>;
+
+  /** Look for a newer version and download it in the background. */
+  checkForUpdate(): Promise<void>;
+  downloadUpdate(): Promise<void>;
+  /** Save pending changes, then install the downloaded update and restart. */
+  installUpdate(): Promise<void>;
 
   setSettingsOpen(open: boolean): void;
   updateAppSettings(patch: Partial<AppSettings>): void;
@@ -279,6 +305,8 @@ export const useStore = create<Store>()((set, get) => {
     pending.set(id, p);
     frame ??= requestAnimationFrame(flush);
   };
+
+  const setUpdate = (patch: Partial<UpdateState>) => set((s) => ({ update: { ...s.update, ...patch } }));
 
   const flushSettings = () => {
     clearTimeout(saveTimer);
@@ -472,6 +500,7 @@ export const useStore = create<Store>()((set, get) => {
     sending: null,
     sendError: null,
     live: {},
+    update: { status: "idle", info: null, progress: null, error: null, checkedAt: null },
     toast: null,
     dismissed: {},
 
@@ -499,6 +528,8 @@ export const useStore = create<Store>()((set, get) => {
               }
             : { auth, config, bootError: null, settingsLoaded: true },
         );
+        // In the background, so an update is ready to install by the time it's needed.
+        if (get().update.status === "idle") void get().checkForUpdate();
         if (config.updateRequired) return set({ phase: "update_required" });
         if (!auth.hasKey) return set({ phase: "signed_out" });
         set({ phase: "ready" });
@@ -546,6 +577,68 @@ export const useStore = create<Store>()((set, get) => {
         const error = toAppError(e);
         set({ modelsStatus: "error", modelsError: error });
         if (isKeyError(error)) keyRejected(error);
+      }
+    },
+
+    async refreshConfig() {
+      try {
+        const config = await getAppConfig();
+        set({ config });
+        const s = get();
+        const answering = Object.keys(s.streams).length > 0 || s.sending !== null;
+        if (config.updateRequired && s.phase !== "loading" && !answering) {
+          flushSettings();
+          await flushAppSettings();
+          set({ phase: "update_required", settingsOpen: false });
+        }
+      } catch {
+        // Keep the config already loaded; the next refresh tries again.
+      }
+    },
+
+    async checkForUpdate() {
+      const before = get().update;
+      if (["checking", "downloading", "installing"].includes(before.status)) return;
+      setUpdate({ status: "checking", error: null });
+      let info: UpdateInfo;
+      try {
+        info = await updateCheck();
+      } catch (e) {
+        // Keep what was found before, e.g. an update already downloaded.
+        return setUpdate({ status: before.status, error: toAppError(e), checkedAt: Date.now() });
+      }
+      const status = info.status === "available" ? (info.downloaded ? "ready" : "available") : info.status;
+      setUpdate({ status, info, progress: null, checkedAt: Date.now() });
+      if (status === "available") await get().downloadUpdate();
+    },
+
+    async downloadUpdate() {
+      if (get().update.status !== "available") return;
+      setUpdate({ status: "downloading", progress: { downloaded: 0, total: null }, error: null });
+      try {
+        await updateDownload((ev) => {
+          if (ev.type === "progress") setUpdate({ progress: { downloaded: ev.downloaded, total: ev.total } });
+        });
+        set((s) => ({
+          update: { ...s.update, status: "ready", progress: null, info: s.update.info && { ...s.update.info, downloaded: true } },
+        }));
+      } catch (e) {
+        setUpdate({ status: "available", progress: null, error: toAppError(e) });
+      }
+    },
+
+    async installUpdate() {
+      if (get().update.status !== "ready") return;
+      setUpdate({ status: "installing", error: null });
+      flushSettings();
+      await flushAppSettings();
+      try {
+        // Restarts the app on success.
+        await updateInstall();
+      } catch (e) {
+        const error = toAppError(e);
+        // The package is gone if a newer check replaced it; then start over.
+        setUpdate(error.kind === "not_found" ? { status: "idle", error } : { status: "ready", error });
       }
     },
 

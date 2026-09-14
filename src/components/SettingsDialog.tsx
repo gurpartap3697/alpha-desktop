@@ -1,21 +1,23 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Dialog from "@radix-ui/react-dialog";
-import { FolderOpen, Keyboard, MessageSquare, History, Palette, UserRound, X } from "lucide-react";
+import { Download, FolderOpen, Keyboard, MessageSquare, History, Palette, RotateCcw, UserRound, X } from "lucide-react";
 import { historyInfo, historyReveal, toAppError, type HistoryInfo, type Theme } from "../api";
 import { useStore } from "../store";
 import { errorTitle } from "../errors";
 import { isMac, SHORTCUTS } from "../shortcuts";
 import { MaxTokensField, SystemPromptField, TemperatureField } from "./ParamFields";
 import { Button, IconButton, Kbd, Notice, Skeleton, cx } from "./ui";
+import { DownloadPageLink, RestartButton, UpdateProgress } from "./Updates";
 
-type Section = "appearance" | "chats" | "history" | "account" | "shortcuts";
+type Section = "appearance" | "chats" | "history" | "account" | "updates" | "shortcuts";
 
 const SECTIONS: { id: Section; label: string; icon: ReactNode }[] = [
   { id: "appearance", label: "Appearance", icon: <Palette size={15} /> },
   { id: "chats", label: "New chats", icon: <MessageSquare size={15} /> },
   { id: "history", label: "History", icon: <History size={15} /> },
   { id: "account", label: "Account", icon: <UserRound size={15} /> },
+  { id: "updates", label: "Updates", icon: <Download size={15} /> },
   { id: "shortcuts", label: "Keyboard", icon: <Keyboard size={15} /> },
 ];
 
@@ -86,7 +88,7 @@ export function SettingsDialog() {
               aria-labelledby={`${tabsId}-${section}`}
               className="min-w-0 flex-1 overflow-y-auto px-6 py-5 text-[13px]"
             >
-              {settingsError && section !== "shortcuts" && section !== "account" && (
+              {settingsError && section !== "shortcuts" && section !== "account" && section !== "updates" && (
                 <Notice
                   className="mb-5"
                   tone="error"
@@ -98,6 +100,7 @@ export function SettingsDialog() {
               {section === "chats" && <NewChatsSection />}
               {section === "history" && <HistorySection />}
               {section === "account" && <AccountSection />}
+              {section === "updates" && <UpdatesSection />}
               {section === "shortcuts" && <ShortcutsSection />}
             </div>
           </div>
@@ -529,7 +532,6 @@ function AccountSection() {
         {row("Model server", <span className="font-mono text-xs">{auth.gatewayUrl}</span>)}
         {row("API key", storage)}
         {source && row("Model details", source, config?.fetchError ?? undefined)}
-        {row("App version", `Alpha ${auth.appVersion}`)}
       </dl>
       <div className="mt-5">
         <p className="leading-5 text-ink-2">Signing out removes the key from this device. Your chats stay.</p>
@@ -542,6 +544,76 @@ function AccountSection() {
         >
           Sign out and remove key
         </Button>
+      </div>
+    </>
+  );
+}
+
+// ---- Updates ----
+
+function UpdatesSection() {
+  const appVersion = useStore((s) => s.auth?.appVersion);
+  const update = useStore((s) => s.update);
+  const check = useStore((s) => s.checkForUpdate);
+  const download = useStore((s) => s.downloadUpdate);
+  const { status, info, error } = update;
+  const busy = status === "checking" || status === "downloading" || status === "installing";
+
+  let message: ReactNode = null;
+  if (status === "checking") message = "Checking for updates…";
+  else if (status === "disabled") message = "This copy of Alpha doesn't update itself.";
+  else if (status === "up_to_date") message = "Alpha is up to date.";
+  else if (status === "available") message = `Alpha ${info?.version} is available.`;
+  else if (status === "ready" || status === "installing") message = `Alpha ${info?.version} is downloaded and ready to install.`;
+
+  return (
+    <>
+      <Heading help="Alpha checks the model server for a new version when it starts and every hour, and downloads it in the background. It's installed when you restart.">
+        Updates
+      </Heading>
+      <p>
+        You have <span className="font-medium">Alpha {appVersion}</span>.
+      </p>
+      <div className="mt-4 max-w-[32rem] space-y-3" aria-live="polite">
+        {message && <p>{message}</p>}
+        {(status === "disabled" || status === "up_to_date") && info?.reason && (
+          <p className="text-xs text-ink-3">{info.reason}.</p>
+        )}
+        {status === "downloading" && <UpdateProgress />}
+        {info?.notes && (status === "available" || status === "downloading" || status === "ready") && (
+          <p className="leading-5 whitespace-pre-wrap text-ink-2">{info.notes}</p>
+        )}
+        {error && (
+          <Notice
+            tone="error"
+            title={errorTitle(error)}
+            details={error.message}
+            actions={
+              status === "available" && (
+                <Button onClick={() => void download()}>
+                  <RotateCcw size={14} />
+                  Download again
+                </Button>
+              )
+            }
+          />
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {(status === "ready" || status === "installing") && <RestartButton />}
+          <Button disabled={busy} onClick={() => void check()}>
+            Check for updates
+          </Button>
+          {update.checkedAt && status !== "checking" && (
+            <span className="text-xs text-ink-3">
+              Last checked {new Date(update.checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+            </span>
+          )}
+        </div>
+        {status === "disabled" && (
+          <p className="leading-5 text-ink-2">
+            New versions are on <DownloadPageLink />.
+          </p>
+        )}
       </div>
     </>
   );

@@ -31,5 +31,7 @@ export function errorTitle(e: AppError, modelName = "This model"): string {
       return "This chat no longer exists.";
     case "interrupted":
       return "Alpha was closed before the answer finished.";
+    case "update":
+      return "Couldn't update Alpha.";
   }
 }

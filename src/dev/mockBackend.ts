@@ -3,6 +3,9 @@
 //
 // Start states via the URL: ?scenario=no_key | rejected | unreachable | update | announcement | file_storage
 //   | history_broken | fresh (empty history, default settings)
+//   Updates: update (this version is too old; 0.2.0 is published), update_unpublished (too old, nothing
+//   published), update_available (0.2.0 downloads in the background), update_broken (the download fails).
+//   "Installing" reloads the page as version 0.2.0.
 // Message commands, like gateway/mock/mock_vllm.py: /error 429|401|404|500|context, /drop, /slow
 // History lives in localStorage, so a reload behaves like restarting the app (including interrupted answers).
 
@@ -10,6 +13,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { defaultAppSettings } from "../api";
 import type {
   AppError,
+  DownloadEvent,
   AppSettings,
   AuthStatus,
   ConfigStatus,
@@ -19,9 +23,38 @@ import type {
   ModelInfo,
   StreamEvent,
   TurnRequest,
+  UpdateInfo,
 } from "../api";
 
 const scenario = new URLSearchParams(location.search).get("scenario") ?? "";
+
+// ---- Updates (src-tauri/src/updates.rs) ----
+
+const INSTALLED_KEY = "alpha-mock-installed-version";
+const installed = sessionStorage.getItem(INSTALLED_KEY);
+const appVersion = installed ?? "0.1.0";
+const published = ["update", "update_available", "update_broken"].includes(scenario) ? "0.2.0" : null;
+const updateRequired = !installed && (scenario === "update" || scenario === "update_unpublished");
+let downloaded = false;
+
+function checkUpdate(): UpdateInfo {
+  const base = { currentVersion: appVersion, version: null, notes: null, downloaded: false, reason: null };
+  if (!published || published === appVersion) {
+    return { ...base, status: "up_to_date", reason: published ? null : "No update has been published" };
+  }
+  return { ...base, status: "available", version: published, notes: "Faster startup and fixes for long chats.", downloaded };
+}
+
+async function downloadUpdate(emit: (ev: DownloadEvent) => void) {
+  const total = 14_200_000;
+  for (let i = 1; i <= 10; i++) {
+    await sleep(120);
+    if (scenario === "update_broken" && i === 6) fail("unreachable", "Download request failed: connection reset");
+    emit({ type: "progress", downloaded: (total * i) / 10, total });
+  }
+  downloaded = true;
+  emit({ type: "finished" });
+}
 
 const models: ModelInfo[] = [
   { id: "gemma", displayName: "Gemma", description: "General purpose", contextWindow: 8192, maxOutputTokens: 2048,
@@ -367,14 +400,14 @@ export function install() {
           storage: hasKey ? (scenario === "file_storage" ? "file" : "keychain") : null,
           storageError: null,
           gatewayUrl: "https://llm.example.org",
-          appVersion: "0.1.0",
+          appVersion,
         } satisfies AuthStatus;
       case "auth_set_key":
         await sleep(600);
         if (String(a.key).trim() === "bad") fail("unauthorized", "Authentication Error, Invalid proxy server token passed.");
         hasKey = true;
         rejected = false;
-        return { hasKey, storage: "keychain", storageError: null, gatewayUrl: "https://llm.example.org", appVersion: "0.1.0" };
+        return { hasKey, storage: "keychain", storageError: null, gatewayUrl: "https://llm.example.org", appVersion };
       case "auth_clear":
         hasKey = false;
         return null;
@@ -382,13 +415,13 @@ export function install() {
         await sleep(150);
         return {
           config: {
-            minAppVersion: scenario === "update" ? "0.2.0" : "0.1.0",
+            minAppVersion: updateRequired ? "0.2.0" : "0.1.0",
             announcement: scenario === "announcement" ? "The Nemotron server restarts at 18:00 for maintenance." : null,
             defaults: { contextWindow: 8192, maxOutputTokens: 2048, temperature: 0.7 },
           },
           source: "remote",
           fetchError: null,
-          updateRequired: scenario === "update",
+          updateRequired,
         } satisfies ConfigStatus;
       case "list_models":
         await sleep(300);
@@ -471,6 +504,22 @@ export function install() {
         }
       case "history_reveal":
         console.info("[mock] history_reveal");
+        return null;
+      case "update_check":
+        await sleep(250);
+        return checkUpdate();
+      case "update_download": {
+        if (!published) fail("not_found", "No update to download. Check for updates first");
+        const channel = a.onEvent as { onmessage: (ev: DownloadEvent) => void };
+        await downloadUpdate((ev) => channel.onmessage(ev));
+        return null;
+      }
+      case "update_install":
+        if (!downloaded) fail("not_found", "The update hasn't been downloaded yet");
+        for (const s of streams.values()) s.cancelled = true;
+        await sleep(300);
+        sessionStorage.setItem(INSTALLED_KEY, published!);
+        location.reload();
         return null;
       case "plugin:opener|open_url":
         window.open(String(a.url), "_blank", "noopener");

@@ -12,6 +12,7 @@ mod settings;
 mod sse;
 mod state;
 mod titles;
+mod updates;
 
 use tauri::Manager;
 
@@ -20,6 +21,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::Updates::default())
         .setup(|app| {
             let gateway = gateway::Gateway::new()?;
             let data_dir = app.path().app_data_dir()?;
@@ -57,6 +60,9 @@ pub fn run() {
             history::history_reveal,
             settings::settings_get,
             settings::settings_update,
+            updates::update_check,
+            updates::update_download,
+            updates::update_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

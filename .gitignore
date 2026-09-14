@@ -23,6 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 
+# Releases published on a local gateway (gateway/scripts/publish_release.py)
+gateway/public/app/updates/
+gateway/public/app/download/
+
 # Gateway secrets
 gateway/.env
 gateway/caddy/certs/*

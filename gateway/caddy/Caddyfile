@@ -10,7 +10,18 @@
 	# tls internal
 	# ------------------------------------------------------------------------
 
-	# Remote app config and (later) updater artifacts.
+	# Optional access log: method, path, status and user agent, never bodies. Caddy redacts the
+	# Authorization header. App requests carry "alpha-desktop/<version>", which shows who has updated.
+	# log {
+	# 	output file /data/access.log {
+	# 		roll_size 50MiB
+	# 		roll_keep 5
+	# 	}
+	# }
+
+	# App config (/app/config.json), app updates (/app/updates/latest.json and one folder per version)
+	# and the download page (/app/download/). Releases are published with scripts/publish_release.py.
+	# no-cache means "revalidate", so a new config or latest.json is seen at once.
 	handle /app/* {
 		root * /srv
 		header Cache-Control "no-cache"

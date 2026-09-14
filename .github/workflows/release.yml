@@ -1,0 +1,246 @@
+name: release
+
+# Push a tag like v0.2.0 (after `npm run set-version -- 0.2.0` is committed) to build signed installers
+# and updater packages for all 3 OSes and attach them to a draft GitHub release. Publishing them on
+# the gateway is a separate, manual step: gateway/scripts/publish_release.py. See docs/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sign-windows: ${{ steps.secrets.outputs.sign-windows }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the app version
+        id: version
+        run: |
+          node scripts/set-version.mjs --check "$GITHUB_REF_NAME"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Signing and gateway settings are present
+        id: secrets
+        env:
+          ALPHA_GATEWAY_URL: ${{ vars.ALPHA_GATEWAY_URL }}
+          ALPHA_UPDATER_PUBKEY: ${{ vars.ALPHA_UPDATER_PUBKEY }}
+          ALPHA_ALLOW_UNSIGNED_WINDOWS: ${{ vars.ALPHA_ALLOW_UNSIGNED_WINDOWS }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          missing=()
+          need() { for name in "$@"; do [ -n "${!name}" ] || missing+=("$name"); done; }
+
+          need ALPHA_GATEWAY_URL ALPHA_UPDATER_PUBKEY TAURI_SIGNING_PRIVATE_KEY
+          if [ -n "$ALPHA_GATEWAY_URL" ] && [[ "$ALPHA_GATEWAY_URL" != https://* ]]; then
+            echo "::error::ALPHA_GATEWAY_URL must be https:// for release builds (the updater refuses plain HTTP)"
+            exit 1
+          fi
+
+          # macOS: without notarization Gatekeeper blocks the app, so there is no unsigned option.
+          need APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
+          if [ -z "$APPLE_API_KEY" ]; then
+            need APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          else
+            need APPLE_API_ISSUER APPLE_API_PRIVATE_KEY
+          fi
+
+          azure=(AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT AZURE_SIGNING_PROFILE)
+          set_azure=0; for name in "${azure[@]}"; do [ -n "${!name}" ] && set_azure=$((set_azure + 1)); done
+          if [ "$set_azure" -eq "${#azure[@]}" ]; then
+            echo "sign-windows=true" >> "$GITHUB_OUTPUT"
+          elif [ "$ALPHA_ALLOW_UNSIGNED_WINDOWS" = "true" ] && [ "$set_azure" -eq 0 ]; then
+            echo "::warning::Windows installers will be unsigned (ALPHA_ALLOW_UNSIGNED_WINDOWS=true). SmartScreen will warn users."
+            echo "sign-windows=false" >> "$GITHUB_OUTPUT"
+          else
+            need "${azure[@]}"
+          fi
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            for name in "${missing[@]}"; do echo "::error::$name is not set (repository secret or variable)"; done
+            echo "See docs/releasing.md → One-time setup."
+            exit 1
+          fi
+
+  bundle:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            args: ""
+            rust-targets: ""
+          # The oldest supported Ubuntu, so the AppImage and packages run on 22.04 and newer.
+          - platform: ubuntu-22.04
+            args: ""
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      ALPHA_GATEWAY_URL: ${{ vars.ALPHA_GATEWAY_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+      # No build cache for releases: every release is built from scratch.
+
+      - run: npm ci
+
+      - name: Windows signing tool (Azure Trusted Signing)
+        if: runner.os == 'Windows' && needs.preflight.outputs.sign-windows == 'true'
+        run: cargo install trusted-signing-cli --locked
+
+      - name: Release config
+        shell: bash
+        env:
+          ALPHA_UPDATER_PUBKEY: ${{ vars.ALPHA_UPDATER_PUBKEY }}
+          SIGN_WINDOWS: ${{ runner.os == 'Windows' && needs.preflight.outputs.sign-windows == 'true' }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: node scripts/release-config.mjs "$RUNNER_TEMP/release.conf.json"
+
+      - name: macOS notarization key
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APPLE_API_PRIVATE_KEY" ]; then
+            path="$RUNNER_TEMP/AuthKey.p8"
+            printf '%s' "$APPLE_API_PRIVATE_KEY" > "$path"
+            echo "APPLE_API_KEY_PATH=$path" >> "$GITHUB_ENV"
+          fi
+          echo "KEYCHAIN_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+
+      - name: Build and sign
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS: the Tauri CLI imports the certificate into a temporary keychain, signs and notarizes.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows: read by trusted-signing-cli.
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: npm run tauri -- build ${{ matrix.args }} --ci --config "$RUNNER_TEMP/release.conf.json"
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          shopt -s nullglob
+          mkdir release
+          bundle=(src-tauri/target/release/bundle src-tauri/target/*/release/bundle)
+          [ ${#bundle[@]} -eq 1 ] || { echo "::error::expected one bundle folder, found: ${bundle[*]}"; exit 1; }
+          b=${bundle[0]}
+          copy() { for f in "$@"; do cp "$f" release/; done; }
+          case "$RUNNER_OS" in
+            macOS)
+              copy "$b"/dmg/*.dmg
+              # Alpha.app.tar.gz carries no version or architecture; name it like the other files.
+              cp "$b"/macos/*.app.tar.gz "release/Alpha_${VERSION}_universal.app.tar.gz"
+              cp "$b"/macos/*.app.tar.gz.sig "release/Alpha_${VERSION}_universal.app.tar.gz.sig"
+              ;;
+            Windows) copy "$b"/nsis/*-setup.exe* "$b"/msi/*.msi* ;;
+            Linux) copy "$b"/appimage/*.AppImage* "$b"/deb/*.deb* "$b"/rpm/*.rpm* ;;
+          esac
+          ls -l release
+          # Every package the updater can install needs its signature.
+          for f in release/*.app.tar.gz release/*-setup.exe release/*.msi release/*.AppImage; do
+            [ -f "$f.sig" ] || { echo "::error::$f has no updater signature"; exit 1; }
+          done
+
+      - name: Verify macOS signature and notarization
+        if: runner.os == 'macOS'
+        run: |
+          app=$(ls -d src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app)
+          codesign --verify --deep --strict --verbose=2 "$app"
+          assessment=$(spctl --assess --type execute --verbose=2 "$app" 2>&1)
+          echo "$assessment"
+          grep -q "Notarized Developer ID" <<<"$assessment"
+          xcrun stapler validate "$app"
+
+      - name: Verify Windows signatures
+        if: runner.os == 'Windows' && needs.preflight.outputs.sign-windows == 'true'
+        shell: pwsh
+        run: |
+          $bad = Get-ChildItem release -Include *.exe,*.msi -Recurse | Get-AuthenticodeSignature | Where-Object Status -ne Valid
+          if ($bad) { $bad | Format-List Path,Status,StatusMessage; exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.os }}
+          path: release/
+          if-no-files-found: error
+
+  draft-release:
+    needs: [preflight, bundle]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - name: Checksums
+        working-directory: release
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: Draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes \
+            --title "Alpha $VERSION"
+          echo "Draft release created. Publish it on the gateway with gateway/scripts/publish_release.py (docs/releasing.md)." >> "$GITHUB_STEP_SUMMARY"

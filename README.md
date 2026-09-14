@@ -4,10 +4,15 @@ Desktop chat client for the org's self-hosted models (vLLM behind a LiteLLM gate
 
 ```
 src/          React UI
-src-tauri/    Rust core: gateway client, SSE streaming, chat history (SQLite), commands
-gateway/      docker-compose for LiteLLM + Postgres + Caddy, mock vLLM, probe/key scripts
-.github/      CI: tests + unsigned builds for macOS, Windows, Linux
+src-tauri/    Rust core: gateway client, SSE streaming, chat history (SQLite), updater, commands
+gateway/      docker-compose for LiteLLM + Postgres + Caddy, mock vLLM, key and release publishing scripts
+scripts/      version bump and release build config
+docs/         user guide, release and rollout runbook
+.github/      CI: tests + unsigned builds on every push; signed releases from version tags
 ```
+
+- **Users:** [docs/user-guide.md](docs/user-guide.md): install, getting a key, updates, what data is stored where
+- **Maintainers:** [docs/releasing.md](docs/releasing.md): signing setup, cutting and publishing a release, pilot rollout
 
 ## Prerequisites
 
@@ -41,7 +46,7 @@ The mock also serves `gateway/public/app/config.json` at `/app/config.json`, as 
 npm run dev   # open http://localhost:1420
 ```
 
-Outside Tauri, a fake backend (`src/dev/mockBackend.ts`, dev builds only) stands in for the Rust commands. Start states: `?scenario=no_key`, `rejected`, `unreachable`, `update`, `announcement`, `file_storage`, `history_broken`, and `fresh` (empty history, default settings). The key `bad` is rejected. The messages `/error 429|401|404|500|context`, `/drop`, `/slow` and `/unreachable` trigger the matching states.
+Outside Tauri, a fake backend (`src/dev/mockBackend.ts`, dev builds only) stands in for the Rust commands. Start states: `?scenario=no_key`, `rejected`, `unreachable`, `update`, `announcement`, `file_storage`, `history_broken`, and `fresh` (empty history, default settings). For updates: `update` (this version is too old and 0.2.0 is published), `update_unpublished` (too old, nothing published), `update_available` (0.2.0 downloads in the background) and `update_broken` (the download fails). "Restart to update" reloads the page as version 0.2.0. The key `bad` is rejected. The messages `/error 429|401|404|500|context`, `/drop`, `/slow` and `/unreachable` trigger the matching states.
 
 The fake keeps chat history and settings in the browser's `localStorage` with a few sample chats (one of them 45 days old, to try auto-delete), so reloading the page behaves like restarting the app. Reloading while an answer streams shows the "closed before the answer finished" state.
 
@@ -50,6 +55,7 @@ The fake keeps chat history and settings in the browser's `localStorage` with a 
 - API key: macOS Keychain, Windows Credential Manager or Linux Secret Service (service `com.alpha.desktop`). If none is available it goes to a `0600` file `gateway-key` in the app data directory, and the app says so. Unsigned dev builds on macOS may ask for Keychain access after each rebuild.
 - Last good app config: `app-config.json` in the app data directory.
 - Chat history: `history.sqlite3` in the app data directory (macOS `~/Library/Application Support/com.alpha.desktop`, Windows `%APPDATA%\com.alpha.desktop`, Linux `~/.local/share/com.alpha.desktop`). Only the Rust core opens it. The webview gets typed commands, not SQL. Answers are written as they stream (about every 0.75 s). Any answer still marked as streaming at startup was cut off by the app closing and is marked as such. Schema migrations are in `src-tauri/src/db.rs`, and the version is tracked with `PRAGMA user_version`. An older app refuses to open history written by a newer one. Deleted chats are overwritten on disk (`secure_delete`), and "Delete all chats" also compacts the file and its WAL.
+- Updates: nothing is stored. The update found by the last check and its downloaded package are kept in memory until installed. Release builds check `<gateway>/app/updates/latest.json` at startup and hourly. Development builds and builds without an updater key don't update (Settings → Updates says why).
 - Settings (theme, defaults for new chats, auto-delete): the `settings` table of the same database, one row per setting. The theme is also copied to the webview's `localStorage` so the window starts in the right colors. Auto-delete runs when the app starts and hourly while it's open. It goes by each chat's last message, and never deletes a chat that is answering.
 
 ## Test
@@ -89,13 +95,34 @@ Esc only stops the answer when it isn't closing something else (a menu, a dialog
 ALPHA_GATEWAY_URL=https://llm.example.org npm run tauri build
 ```
 
-CI (`.github/workflows/build.yml`) builds unsigned bundles on native runners:
+A local build has no updater key, so it doesn't update itself. CI (`.github/workflows/build.yml`) builds the same unsigned bundles on native runners for every push:
 
 - macOS: universal `.dmg`
 - Windows: NSIS `.exe` and `.msi`
 - Linux: AppImage, `.deb` and `.rpm`
 
 Set the repository variable `ALPHA_GATEWAY_URL` so CI builds point at the real gateway.
+
+## Release
+
+```sh
+npm run set-version -- 0.2.0          # commit, merge, then:
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The `release` workflow builds, signs (macOS Developer ID and notarization, Windows Authenticode) and verifies the bundles, adds updater packages signed with the updater key, and attaches everything to a draft GitHub release. On the gateway host, `gateway/scripts/publish_release.py stage` and then `promote` make it the version installed apps update to. Setup, the full procedure and the pilot plan are in [docs/releasing.md](docs/releasing.md).
+
+## Phase 4 checklist
+
+- [ ] Updater keypair generated, stored in repository secrets and backed up offline in two places
+- [ ] Apple Developer ID certificate and notarization credentials in secrets; a release build opens on a clean Mac with no Gatekeeper warning
+- [ ] Windows signing (Azure Trusted Signing) set up, or `ALPHA_ALLOW_UNSIGNED_WINDOWS` chosen deliberately for the pilot
+- [ ] First tagged release: every job green, and the draft release has all files from docs/releasing.md
+- [ ] Staged and promoted on the gateway. `/app/download/` lists the installers and `/app/updates/latest.json` has all platforms
+- [ ] Auto-update from one release to the next works on macOS, Windows and Linux (AppImage, plus `.deb` or `.rpm`), keeping chats and the key
+- [ ] Raising `minAppVersion` shows the update screen, which installs the update
+- [ ] User guide shared with the pilot group; install and key steps followed by someone who hasn't seen the app
+- [ ] Pilot exit criteria met (docs/releasing.md → Pilot and rollout)
 
 ## Phase 3 checklist
 

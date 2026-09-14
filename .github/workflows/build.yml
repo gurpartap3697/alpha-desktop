@@ -68,7 +68,8 @@ jobs:
             playwright-report/
             test-results/
 
-  # Unsigned builds for all 3 OSes (Phase 0). Signing/notarization and releases come in Phase 4.
+  # Unsigned builds for all 3 OSes on every push, so platform problems show up early.
+  # Signed, auto-updating releases are built by release.yml from a version tag.
   bundle:
     needs: [test, e2e]
     strategy:

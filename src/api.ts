@@ -15,7 +15,8 @@ export type ErrorKind =
   | "storage"
   | "database"
   | "not_found"
-  | "interrupted";
+  | "interrupted"
+  | "update";
 
 export interface AppError {
   kind: ErrorKind;
@@ -213,6 +214,33 @@ export const defaultAppSettings = (): AppSettings => ({
 
 export const settingsGet = () => invoke<AppSettings>("settings_get");
 export const settingsUpdate = (patch: Partial<AppSettings>) => invoke<AppSettings>("settings_update", { patch });
+
+// src-tauri/src/updates.rs
+export interface UpdateInfo {
+  /** `disabled`: this build can't update itself (development build, no update key, plain-HTTP server). */
+  status: "disabled" | "up_to_date" | "available";
+  currentVersion: string;
+  version: string | null;
+  notes: string | null;
+  /** Downloaded and verified, ready to install. */
+  downloaded: boolean;
+  /** Why updates are disabled, or why nothing was found. */
+  reason: string | null;
+}
+
+export type DownloadEvent = { type: "progress"; downloaded: number; total: number | null } | { type: "finished" };
+
+export const updateCheck = () => invoke<UpdateInfo>("update_check");
+
+/** Download the update found by the last check. Resolves once it's verified. */
+export function updateDownload(onEvent: (ev: DownloadEvent) => void): Promise<void> {
+  const channel = new Channel<DownloadEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("update_download", { onEvent: channel });
+}
+
+/** Stops streaming answers, installs the downloaded update and restarts the app. */
+export const updateInstall = () => invoke<void>("update_install");
 
 export function isAppError(e: unknown): e is AppError {
   return typeof e === "object" && e !== null && "kind" in e && "message" in e;
